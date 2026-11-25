@@ -122,9 +122,17 @@ button.addEventListener("click", async () => {
 }
 
 const button = (page, name) => page.getByRole("button", { name, exact: true });
+const interviewMode = (page, name) => page.getByRole("radiogroup", { name: "面试模式", exact: true })
+  .getByRole("radio", { name, exact: true });
 async function waitForStatus(page, source, status) {
   await page.waitForFunction(({ source, status }) => globalThis.__meetingSmokeEvents.some((event) =>
     event.source === source && event.type === "status" && event.status === status), { source, status }, { timeout: 12_000 });
+}
+
+async function chooseFixture(picker) {
+  const option = picker.locator("option").filter({ hasText: fixtureTitle });
+  await option.waitFor({ state: "attached" });
+  await picker.selectOption(await option.getAttribute("value"));
 }
 
 try {
@@ -169,18 +177,13 @@ try {
   await speech.getByText("已保存", { exact: true }).waitFor({ state: "visible" });
   await button(settings, "关闭模型设置").click();
 
-  const sources = interview.locator("details.audio-sources");
-  if (!(await sources.evaluate((details) => details.open))) {
-    await sources.locator("summary").click();
-  }
-  const mic = interview.getByRole("switch", { name: "开场时开启本机麦克风" });
-  assert.equal(await mic.isChecked(), false);
-  await interview.getByRole("switch", { name: "开场时连接会议应用" }).check();
-  const picker = interview.getByRole("combobox", { name: "选择会议应用" });
-  const option = picker.locator("option").filter({ hasText: fixtureTitle });
-  await option.waitFor({ state: "attached" });
-  await picker.selectOption(await option.getAttribute("value"));
+  assert(await interviewMode(interview, "手动录入").isChecked());
+  assert.equal(await interview.getByRole("combobox", { name: "选择会议应用", exact: true }).count(), 0);
   await button(interview, "开始面试").click();
+  await button(interview, "连接会议音频").click();
+  const meetingDialog = interview.getByRole("dialog", { name: "连接会议音频", exact: true });
+  await chooseFixture(meetingDialog.getByRole("combobox", { name: "会议应用", exact: true }));
+  await button(meetingDialog, "连接").click();
   await waitForStatus(interview, "meeting", "ready");
   await button(interview, "开启麦克风").waitFor({ state: "visible" });
 
@@ -192,15 +195,30 @@ try {
   assert(await interview.evaluate(() => globalThis.__meetingSmokeEvents.some((event) => event.source === "meeting" && event.type === "final")));
   assert.equal(await interview.evaluate(() => globalThis.__meetingSmokeMicCalls), 0);
   assert.deepEqual(uploads.map(({ source }) => source), ["meeting"]);
-  console.log("PASS listed and captured a separate Windows process, heard its synthetic tone at 16 kHz, and rendered a meeting-only final transcript");
+  console.log("PASS manual start with in-session selection captures only the selected Windows process, preserving the 16 kHz meeting-only transcript");
 
+  await button(interview, "结束面试").click();
+  await interview.getByRole("heading", { name: "面试结束", exact: true }).waitFor({ state: "visible" });
+  await waitForStatus(interview, "meeting", "stopped");
+  await interview.evaluate(() => { globalThis.__meetingSmokeEvents.length = 0; });
+  await button(interview, "新面试").click();
+
+  await interviewMode(interview, "线上面试").check();
+  const picker = interview.getByRole("combobox", { name: "选择会议应用", exact: true });
+  await chooseFixture(picker);
+  assert.equal(await interview.evaluate(() => globalThis.__meetingSmokeMicCalls), 0,
+    "Selecting a mode or application may not start the microphone before the interview.");
   microphoneAllowed = true;
-  await button(interview, "开启麦克风").click();
-  await waitForStatus(interview, "mic", "ready");
+  await button(interview, "开始面试").click();
+  await Promise.all([waitForStatus(interview, "mic", "ready"), waitForStatus(interview, "meeting", "ready")]);
   const waitForMovingMeter = () => interview.waitForFunction(() => document.querySelector("#mic-meter")?.value > 0.03);
   await waitForMovingMeter();
   assert.equal(await interview.evaluate(() => globalThis.__meetingSmokeMicCalls), 1);
   assert(await button(interview, "关闭会议音频").isEnabled());
+  assert(await button(interview, "关闭麦克风").isEnabled());
+  await button(tone, "Play synthetic tone").click();
+  await row.locator(".segment-tags").getByText("会议音频", { exact: true }).waitFor({ state: "visible" });
+  assert.equal(uploads.filter(({ source }) => source === "meeting").length, 2);
 
   await button(interview, "关闭会议音频").click();
   await button(interview, "连接会议音频").waitFor({ state: "visible" });
@@ -217,11 +235,11 @@ try {
   await interview.getByRole("article").filter({ hasText: microphoneText })
     .locator(".segment-tags").getByText("本机麦克风", { exact: true }).waitFor({ state: "visible" });
   assert.deepEqual(requestErrors, []);
-  assert.equal(uploads.filter(({ source }) => source === "meeting").length, 1,
+  assert.equal(uploads.filter(({ source }) => source === "meeting").length, 2,
     "Stopped meeting capture must not upload subsequent fixture playback.");
   assert(uploads.some(({ source }) => source === "mic"));
   assert.equal(await interview.evaluate(() => globalThis.__meetingSmokeMicCalls), 1);
-  console.log("PASS meeting and fake microphone coexist; stopping meeting preserves the mic meter and separately attributed transcript, with no fixture playback leak");
+  console.log("PASS online mode auto-starts selected meeting audio and fake microphone; stopping meeting preserves mic and excludes later fixture playback");
 } catch (error) {
   if (requestErrors.length) console.error("Loopback Whisper test rejected a request:", requestErrors.join("; "));
   throw error;

@@ -1,6 +1,6 @@
 {
   "name": "aural-interview-desktop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Aural Interview for Windows",
   "author": "Aural Interview",
@@ -28,7 +28,10 @@
       "output": "build/package"
     },
     "extraResources": [
-      { "from": "build/native", "to": "native" }
+      {
+        "from": "build/native",
+        "to": "native"
+      }
     ],
     "files": [
       "build/main.cjs",

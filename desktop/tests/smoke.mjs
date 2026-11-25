@@ -193,21 +193,37 @@ try {
   assert(await electron.evaluate(({ app }) => app.commandLine.hasSwitch("use-fake-device-for-media-stream")));
 
   const startButton = button(main, "开始面试");
-  const startMic = main.getByRole("switch", { name: "开场时开启本机麦克风", exact: true });
+  const modeGroup = (window) => window.getByRole("radiogroup", { name: "面试模式", exact: true });
+  const mode = (window, name) => modeGroup(window).getByRole("radio", { name, exact: true });
+  const meetingPicker = (window) => window.getByRole("combobox", { name: "选择会议应用", exact: true });
   const intakeSummary = exactText(main, "面试资料");
   await visible(startButton);
+  await visible(modeGroup(main));
+  await visible(intakeSummary);
   assert.equal(await startButton.count(), 1);
   assert.equal(await exactText(main, "开始面试").filter({ visible: true }).count(), 1);
-  const [startBounds, micBounds, intakeBounds] = await Promise.all([
-    startButton.boundingBox(), startMic.boundingBox(), intakeSummary.boundingBox(),
-  ]);
-  assert(startBounds && micBounds && intakeBounds, "Expected the start button, microphone switch, and interview materials on the homepage.");
-  const startBottom = startBounds.y + startBounds.height;
-  assert(startBottom <= micBounds.y && startBottom <= intakeBounds.y, "Expected the start button above the microphone switch and interview materials.");
+  assert.equal(await modeGroup(main).getByRole("radio").count(), 3);
+  assert(await mode(main, "手动录入").isChecked());
+  assert.equal(await meetingPicker(main).count(), 0);
+  await main.evaluate(() => {
+    globalThis.__manualMicCalls = 0;
+    const getUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
+      value: (...args) => { globalThis.__manualMicCalls++; return getUserMedia(...args); },
+    });
+  });
   assert.equal(await main.getByLabel("JD", { exact: true }).inputValue(), "");
   assert.equal(await main.getByLabel("简历", { exact: true }).inputValue(), "");
   assert.equal(requests.length, 0);
   await screenshot(main, "Home");
+  await mode(main, "当面面试").check();
+  assert.equal(await meetingPicker(main).count(), 0);
+  await mode(main, "线上面试").check();
+  await visible(meetingPicker(main));
+  await mode(main, "手动录入").check();
+  await meetingPicker(main).waitFor({ state: "hidden" });
+  assert.equal(await main.evaluate(() => globalThis.__manualMicCalls), 0);
+  console.log("PASS homepage defaults to manual entry and lists meeting applications only for online mode");
 
   await button(main, "模型设置").click();
   const modal = main.getByRole("dialog", { name: "模型设置" });
@@ -274,15 +290,13 @@ try {
   assert.equal(requests.length, 2);
   console.log("PASS two compatible text interfaces, real draft model discovery, default/per-task model selection and encrypted storage");
 
-  await startMic.check();
   await startButton.click();
   await visible(main.getByRole("heading", { name: "面试中" }));
-  await visible(exactText(main, "麦克风开启 · 本地监听"));
-  await main.waitForFunction(() => document.querySelector("#mic-meter")?.value > 0, undefined, { timeout: 12_000 });
-  await button(main, "关闭麦克风").click();
   await visible(exactText(main, "麦克风关闭"));
+  await visible(button(main, "连接会议音频"));
+  assert.equal(await main.evaluate(() => globalThis.__manualMicCalls), 0);
   assert.equal(requests.length, 2);
-  console.log("PASS zero-context start with fake-device microphone, moving audio meter and stop");
+  console.log("PASS zero-context manual start does not open either audio source");
 
   const facing = main.getByRole("region", { name: "实时转写" });
   const assessment = main.getByRole("region", { name: "当前问题" });
@@ -348,6 +362,7 @@ try {
 
   await button(main, "结束面试").click();
   await visible(main.getByRole("heading", { name: "面试结束" }));
+  assert.equal(await main.evaluate(() => globalThis.__manualMicCalls), 0);
   const draft = await main.getByLabel("面评草稿").inputValue();
   assert(draft.includes("暂评分：4/5") && draft.includes(candidateQuote));
   assert(!draft.includes(interviewerText));
@@ -464,10 +479,16 @@ try {
   assert.equal(configured.configured, true);
   assert.equal(configured.enabled, true);
   await button(speechModal, "关闭模型设置").click();
+  await speechWindow.evaluate(() => {
+    globalThis.__inPersonAsrEvents = [];
+    window.auralDesktop.onAsrEvent((event) => globalThis.__inPersonAsrEvents.push(event));
+  });
+  await mode(speechWindow, "当面面试").check();
+  assert.equal(await meetingPicker(speechWindow).count(), 0);
   await button(speechWindow, "开始面试").click();
   await visible(speechWindow.getByRole("heading", { name: "面试中" }));
-  await button(speechWindow, "开启麦克风").click();
   await visible(exactText(speechWindow, "分段转写中"));
+  await visible(button(speechWindow, "连接会议音频"));
   await speechWindow.waitForFunction(() => document.querySelector("#mic-meter")?.value > 0.06, undefined, { timeout: 12_000 });
   await button(speechWindow, "关闭麦克风").click();
   await visible(exactText(speechWindow, "麦克风关闭"));
@@ -475,9 +496,11 @@ try {
   assert(audioRequests.slice(1).some(({ peak }) => peak > 300), "No genuine microphone PCM reached the local ASR mock.");
   const speechSegment = speechWindow.getByRole("article").filter({ hasText: whisperQuote }).first();
   assert.equal(await speechSegment.getByRole("combobox", { name: "更改此段说话人" }).inputValue(), "unknown");
+  assert(await speechWindow.evaluate(() => globalThis.__inPersonAsrEvents.some((event) => event.source === "mic" && event.status === "ready")
+    && !globalThis.__inPersonAsrEvents.some((event) => event.source === "meeting")));
   assert.equal(requests.length, 4);
   assert.deepEqual(errors, []);
-  console.log("PASS keyless local Whisper probe and genuine fake-microphone PCM → WAV HTTP → final transcript");
+  console.log("PASS in-person mode auto-starts only the fake microphone and sends genuine PCM to the local Whisper probe");
 } finally {
   try {
     if (electron) {

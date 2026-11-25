@@ -9,6 +9,8 @@ const app = document.querySelector<HTMLElement>("#app")!;
 const bridge = window.auralDesktop;
 const roles = { unknown: "待确认", interviewer: "面试官", candidate: "候选人" } as const;
 const audioLabels = { mic: "本机麦克风", meeting: "会议音频" } as const;
+const interviewModes = { manual: "手动录入", "in-person": "当面面试", online: "线上面试" } as const;
+type InterviewMode = keyof typeof interviewModes;
 type InterviewEntry = TranscriptSegment & { source?: keyof typeof audioLabels };
 type MeetingApp = Awaited<ReturnType<DesktopBridge["listMeetingApps"]>>[number];
 type Turn = {
@@ -37,12 +39,10 @@ function startWorkspace() {
   let turns: Turn[] = [];
   let index = 0;
   let intakeOpen = false;
-  let audioSourcesOpen = true;
   let jobDescription = "";
   let resume = "";
   let brief: InterviewBrief | undefined;
-  let startWithMic = false;
-  let startWithMeeting = false;
+  let interviewMode: InterviewMode = "manual";
   let homeApps: MeetingApp[] = [];
   let homeMeetingId = "";
   let loadingHomeApps = false;
@@ -104,23 +104,20 @@ function startWorkspace() {
     return `<main class="home"><section class="start-card">
       <div class="hero-icon">${icon("mic", 42)}</div>
       <button class="button primary start-button" type="button" data-action="start">${icon("mic")}开始面试</button>
-      <details class="intake audio-sources" ${audioSourcesOpen ? "open" : ""}>
-        <summary>${icon("mic")}<span>音频来源</span>${icon("chevron", 15)}</summary>
-        <div class="audio-source-fields">
-          <label class="mic-switch">
-            <span>本机麦克风</span>
-            <input type="checkbox" role="switch" id="start-mic" aria-label="开场时开启本机麦克风" ${startWithMic ? "checked" : ""}>
-          </label>
-          <label class="mic-switch">
-            <span>会议应用</span>
-            <input type="checkbox" role="switch" id="start-meeting" aria-label="开场时连接会议应用" ${startWithMeeting ? "checked" : ""}>
-          </label>
-          ${startWithMeeting ? `<div class="meeting-picker">
+      <section class="interview-modes">
+        <div class="mode-heading" id="interview-modes-title">${icon("mic")}面试模式</div>
+        <div class="mode-options" role="radiogroup" aria-labelledby="interview-modes-title">
+          ${Object.entries(interviewModes).map(([value, label]) => `<label class="mode-option">
+            <input type="radio" name="interview-mode" value="${value}" ${interviewMode === value ? "checked" : ""}>
+            <span>${label}</span>
+          </label>`).join("")}
+        </div>
+        ${interviewMode === "online" ? `<div class="meeting-picker">
             <select id="start-meeting-app" aria-label="选择会议应用" ${loadingHomeApps ? "disabled" : ""}>${meetingOptions(homeApps, homeMeetingId, loadingHomeApps)}</select>
             <button type="button" class="button" data-action="refresh-meeting-apps" ${loadingHomeApps ? "disabled" : ""}>刷新</button>
-          </div>${homeAppsError ? `<small class="error" role="status">${h(homeAppsError)}</small>` : ""}` : ""}
-        </div>
-      </details>
+          </div><small class="muted">开场时同时采集会议声音和本机麦克风</small>
+          ${homeAppsError ? `<small class="error" role="status">${h(homeAppsError)}</small>` : ""}` : ""}
+      </section>
       <details class="intake" ${intakeOpen ? "open" : ""}>
         <summary>${icon("folder")}<span>面试资料</span><span class="muted optional">选填</span>${icon("chevron", 15)}</summary>
         <div class="intake-body">
@@ -251,17 +248,14 @@ function startWorkspace() {
   }
 
   function render() {
+    const modeFocused = app.querySelector("input[name='interview-mode']:focus");
     app.innerHTML = `<header class="toolbar"><div class="brand"><span class="brand-icon">${icon("chat", 21)}</span>面试助手</div>
       <div class="toolbar-actions"><button class="button" data-action="settings" type="button">${icon("sliders")}模型设置</button>
       <button class="button" data-action="overlay" type="button">${icon("layers")}浮窗</button></div></header>
       ${phase === "idle" ? home() : phase === "live" ? live() : summary()}`;
-    for (const details of app.querySelectorAll<HTMLDetailsElement>("details")) {
-      details.addEventListener("toggle", () => {
-        if (!details.isConnected) return;
-        if (details.classList.contains("audio-sources")) audioSourcesOpen = details.open;
-        else intakeOpen = details.open;
-      });
-    }
+    const intake = app.querySelector<HTMLDetailsElement>("details.intake");
+    intake?.addEventListener("toggle", () => { if (intake.isConnected) intakeOpen = intake.open; });
+    if (modeFocused) app.querySelector<HTMLInputElement>("input[name='interview-mode']:checked")?.focus({ preventScroll: true });
     publish();
   }
 
@@ -526,8 +520,9 @@ function startWorkspace() {
 
   function startInterview() {
     if (phase !== "idle" || busy) return;
-    const meetingApp = startWithMeeting ? homeApps.find((item) => item.id === homeMeetingId) : undefined;
-    if (startWithMeeting && !meetingApp) { showNotice("请选择会议应用。", true); return; }
+    const online = interviewMode === "online";
+    const meetingApp = online ? homeApps.find((item) => item.id === homeMeetingId) : undefined;
+    if (online && !meetingApp) { showNotice("请选择会议应用。", true); return; }
     if (meetingApp && !speechReady()) return;
     turns = (brief?.agenda ?? quickQuestions).map((question) => ({ question, entries: [] }));
     index = 0;
@@ -538,7 +533,7 @@ function startWorkspace() {
     start = Date.now();
     phase = "live";
     render();
-    if (startWithMic) void toggleMic();
+    if (interviewMode !== "manual") void toggleMic();
     if (meetingApp) void connectMeeting(meetingApp);
   }
 
@@ -656,7 +651,7 @@ function startWorkspace() {
         resume = "";
         brief = undefined;
         intakeOpen = false;
-        startWithMeeting = false;
+        interviewMode = "manual";
         homeMeetingId = "";
         homeApps = [];
         homeAppsError = "";
@@ -695,13 +690,16 @@ function startWorkspace() {
   });
   app.addEventListener("change", (event) => {
     const input = event.target as HTMLInputElement | HTMLSelectElement;
-    if (input.id === "start-mic" && input instanceof HTMLInputElement) startWithMic = input.checked;
-    if (input.id === "start-meeting" && input instanceof HTMLInputElement) {
-      startWithMeeting = input.checked;
-      if (startWithMeeting) void refreshHomeApps();
+    if (input.name === "interview-mode" && Object.hasOwn(interviewModes, input.value)) {
+      interviewMode = input.value as InterviewMode;
+      showNotice("");
+      if (interviewMode === "online" && !loadingHomeApps) void refreshHomeApps();
       else render();
     }
-    if (input.id === "start-meeting-app") homeMeetingId = input.value;
+    if (input.id === "start-meeting-app") {
+      homeMeetingId = input.value;
+      showNotice("");
+    }
     if (input.id === "capture-role") role = input.value as SpeakerRole;
     if (input.id === "meeting-role") meetingRole = input.value as SpeakerRole;
     if (input.dataset.segment) {
