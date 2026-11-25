@@ -23,7 +23,7 @@ export function buildSummaryPrompt(
   codeSnippets?: CodeSnippetInput[] | null
 ): LLMMessage[] {
   const transcript = messages
-    .map((m) => `${m.role === "user" ? "Participant" : "Interviewer"}: ${m.content}`)
+    .map((m) => `${m.role.toLowerCase() === "user" ? "Participant" : "Interviewer"}: ${m.content}`)
     .join("\n\n");
 
   const objectiveSection = objective
