@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { QWEN_COMPATIBLE_PRESET, runText, testText, TextModelError, type TextProfile } from "../src/main/text";
+import { listTextModels, runText, testText, TextModelError, type TextProfile } from "../src/main/text";
 
-const qwen = { ...QWEN_COMPATIBLE_PRESET, apiKey: "mock-key" };
+const qwen: TextProfile = { protocol: "compatible", baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1", model: "qwen-plus", apiKey: "mock-key" };
 const local: TextProfile = { protocol: "compatible", baseUrl: "http://127.0.0.1:7258/v1/chat/completions", model: "local", apiKey: "" };
 const question = { id: "q1", prompt: "怎样排查接口延迟？", criterion: "故障定位", strongAnswer: "描述操作和数据", minutes: 5 };
 const nextQuestion = { ...question, id: "q2", prompt: "怎样回滚这项改动？" };
@@ -44,6 +44,130 @@ test("uses DashScope JSON mode and tests a native Gemini profile without exposin
   assert.deepEqual(await testText(qwen), { ok: true });
   assert.deepEqual(await testText({ protocol: "gemini", baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "models/mock-model", apiKey: "second-mock-key" }), { ok: true });
   assert.equal(fetch.mock.callCount(), 2);
+});
+
+test("uses documented reasoning controls only for named compatible vendors and models", async (context) => {
+  const profiles = [
+    { baseUrl: "https://api.deepseek.com", model: "deepseek-flash", path: "/chat/completions", options: { thinking: { type: "disabled" }, max_tokens: 1024, response_format: { type: "json_object" } } },
+    { baseUrl: "https://api.moonshot.cn/v1", model: "kimi-k2.6", path: "/v1/chat/completions", options: { thinking: { type: "disabled" }, max_tokens: 1024, response_format: { type: "json_object" } } },
+    { baseUrl: "https://api.moonshot.ai/v1", model: "kimi-k3.1-pro", path: "/v1/chat/completions", options: { reasoning_effort: "low", max_completion_tokens: 1024, response_format: { type: "json_object" } } },
+    { baseUrl: "https://api.minimax.cn/v1", model: "MiniMax-M3.1-Flash", path: "/v1/chat/completions", options: { reasoning_split: true, reasoning_effort: "low", max_completion_tokens: 1024 } },
+    { baseUrl: "https://api.minimax.io/v1", model: "MiniMax-M3", path: "/v1/chat/completions", options: { reasoning_split: true, thinking: { type: "disabled" }, max_completion_tokens: 1024 } },
+    { baseUrl: "https://compatible.example.test/v1", model: "kimi-k2.6", path: "/v1/chat/completions", options: { max_tokens: 1024, response_format: { type: "json_object" } } },
+  ];
+  let index = 0;
+  context.mock.method(globalThis, "fetch", async (input: URL, init: RequestInit) => {
+    const profile = profiles[index++];
+    const { model, messages, ...options } = JSON.parse(String(init.body));
+    assert.equal(input.origin, new URL(profile.baseUrl).origin);
+    assert.equal(input.pathname, profile.path);
+    assert.equal(model, profile.model);
+    assert.match(messages[0].content, /JSON/);
+    assert.deepEqual(options, profile.options);
+    if (input.hostname.startsWith("api.minimax.")) {
+      return Response.json({ choices: [{ message: { reasoning_content: "separate reasoning", content: '```json\n{"ok":true}\n```' } }] });
+    }
+    return completion({ ok: true });
+  });
+  for (const { baseUrl, model } of profiles) {
+    assert.deepEqual(await testText({ protocol: "compatible", apiKey: "mock-key", baseUrl, model }), { ok: true });
+  }
+  assert.equal(index, profiles.length);
+});
+
+test("Anthropic-compatible Messages sends top-level system instructions and reads only final text blocks", async (context) => {
+  let response = Response.json({ stop_reason: "end_turn", content: [{ type: "thinking", text: "ignore this" }, { type: "text", text: '```json\n{"ok":' }, { type: "text", text: "true}\n```" }] });
+  const fetch = context.mock.method(globalThis, "fetch", async (url: URL, init: RequestInit) => {
+    const body = JSON.parse(String(init.body));
+    const headers = new Headers(init.headers);
+    assert.equal(init.method, "POST");
+    assert.equal(url.pathname, "/v1/messages");
+    assert.equal(headers.get("anthropic-version"), "2023-06-01");
+    assert.equal(headers.has("Authorization"), false);
+    if (url.protocol === "https:") assert.equal(headers.get("x-api-key"), "mock-key");
+    else assert.equal(headers.has("x-api-key"), false);
+    assert.equal(body.model, "mock-model");
+    assert.equal(body.max_tokens, 1024);
+    assert.match(body.system, /JSON/);
+    assert.deepEqual(body.messages, [{ role: "user", content: 'Return this JSON: {"ok":true}' }]);
+    assert.equal(body.response_format, undefined);
+    return response;
+  });
+  const profile: TextProfile = { protocol: "anthropic", baseUrl: "https://anthropic.example.test/v1/messages", model: "mock-model", apiKey: "mock-key" };
+  assert.deepEqual(await testText(profile), { ok: true });
+  response = Response.json({ stop_reason: "max_tokens", content: [{ type: "text", text: '{"ok":true}' }] });
+  await assert.rejects(testText({ ...profile, baseUrl: "http://localhost:8000", apiKey: "" }), { code: "response_too_large" });
+  await assert.rejects(testText({ ...profile, apiKey: "" }), { code: "invalid_config" });
+  assert.equal(fetch.mock.callCount(), 2);
+});
+
+test("model discovery and generation normalize the same compatible base and full endpoint paths", async (context) => {
+  const paths = [
+    { base: "", prefix: "/v1" },
+    { base: "/v1/", prefix: "/v1" },
+    { base: "/v1/chat/completions", prefix: "/v1" },
+    { base: "/gateway/v1/chat/completions/", prefix: "/gateway/v1" },
+    { base: "/chat/completions", prefix: "" },
+    { base: "/v1/models", prefix: "/v1" },
+  ];
+  let index = 0;
+  context.mock.method(globalThis, "fetch", async (url: URL, init: RequestInit) => {
+    const isList = index % 2 === 0;
+    const { prefix } = paths[Math.floor(index++ / 2)];
+    assert.equal(url.pathname, `${prefix}${isList ? "/models" : "/chat/completions"}`);
+    assert.equal(url.search, "");
+    assert.equal(init.method, isList ? "GET" : "POST");
+    assert.equal(init.redirect, "error");
+    assert.equal(new Headers(init.headers).has("Authorization"), false);
+    return isList ? Response.json({ data: [{ id: "a" }, { id: "b" }, { id: "a" }, { id: "\u0001invalid" }] }) : completion({ ok: true });
+  });
+  for (const { base } of paths) {
+    const profile = { protocol: "compatible", baseUrl: `http://127.0.0.1:8000${base}`, apiKey: "" } as const;
+    assert.deepEqual(await listTextModels(profile), ["a", "b"]);
+    assert.deepEqual(await testText({ ...profile, model: "a" }), { ok: true });
+  }
+  assert.equal(index, paths.length * 2);
+});
+
+test("model discovery distinguishes disabled listing from generation errors", async (context) => {
+  context.mock.method(globalThis, "fetch", async () => new Response(null, { status: 404 }));
+  await assert.rejects(listTextModels(local), {
+    code: "model_list_unavailable",
+    status: 404,
+    message: /未提供模型列表，请检查 API 地址或网关设置/,
+  });
+  await assert.rejects(testText(local), { code: "provider_failure", status: 404 });
+});
+
+test("Anthropic discovery follows official cursors within size and page bounds", async (context) => {
+  let page = 0;
+  let mode: "paginate" | "repeat" | "http-error" = "paginate";
+  context.mock.method(globalThis, "fetch", async (url: URL, init: RequestInit) => {
+    const current = ++page;
+    assert.equal(url.pathname, "/proxy/v1/models");
+    assert.equal(url.searchParams.get("limit"), "100");
+    assert.equal(url.searchParams.get("after_id"), current === 1 ? null : `cursor ${current - 1}`);
+    const headers = new Headers(init.headers);
+    assert.equal(headers.get("x-api-key"), "mock-key");
+    assert.equal(headers.get("anthropic-version"), "2023-06-01");
+    if (mode === "http-error") return new Response("mock-key leaked by vendor", { status: 429 });
+    return Response.json({ data: [{ id: `model-${current}` }], has_more: true, last_id: mode === "repeat" ? "cursor 1" : `cursor ${current}` });
+  });
+  const profile = { protocol: "anthropic", baseUrl: "https://anthropic.example.test/proxy/v1/messages/", apiKey: "mock-key" } as const;
+  assert.deepEqual(await listTextModels(profile), Array.from({ length: 8 }, (_, index) => `model-${index + 1}`));
+  assert.equal(page, 8);
+  page = 0;
+  mode = "repeat";
+  await assert.rejects(listTextModels(profile), { code: "invalid_output" });
+  assert.equal(page, 2);
+  page = 0;
+  mode = "http-error";
+  await assert.rejects(listTextModels(profile), (error) => {
+    assert(error instanceof TextModelError);
+    assert.equal(error.status, 429);
+    assert.doesNotMatch(error.message, /mock-key/);
+    return true;
+  });
 });
 
 test("prepares a generic plan without candidate documents, and keeps local compatible profiles independent", async (context) => {

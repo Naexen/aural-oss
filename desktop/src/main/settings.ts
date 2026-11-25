@@ -3,19 +3,24 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { safeStorage } from "electron";
 import { z } from "zod";
-import type { PublicSettings, TextTask } from "./bridge-types";
-import { QWEN_COMPATIBLE_PRESET, type TextProfile } from "./text";
+import { speechProviders, type PublicSettings, type SpeechProvider, type TextTask } from "./bridge-types";
+import type { TextProfile } from "./text";
 
 const address = z.string().trim().max(2048);
 const model = z.string().trim().max(256);
-const textFields = { protocol: z.enum(["compatible", "gemini"]), baseUrl: address, model };
-const speechFields = { provider: z.enum(["qwen", "qwen-audio"]), baseUrl: address, model };
+const textFields = { protocol: z.enum(["compatible", "anthropic", "gemini"]), baseUrl: address, model };
+const speechFields = { provider: z.enum(speechProviders), baseUrl: address, model };
 const secretUpdate = {
   apiKey: z.string().trim().max(4096).regex(/^[!-~]*$/).optional(),
   clearKey: z.boolean().optional(),
 };
 const encryptedKey = z.string().max(16_384).regex(/^[A-Za-z0-9+/]+={0,2}$/).optional();
 const textUpdate = z.strictObject({ ...textFields, ...secretUpdate });
+const textConnection = z.strictObject({
+  protocol: z.enum(["compatible", "anthropic"]),
+  baseUrl: address.min(1),
+  ...secretUpdate,
+});
 const storedText = z.strictObject({ ...textFields, encryptedKey });
 const storedSpeech = z.strictObject({ ...speechFields, enabled: z.boolean(), encryptedKey });
 export const textTask = z.enum(["prepare", "suggest", "score", "polish"]);
@@ -35,17 +40,38 @@ type StoredText = z.infer<typeof storedText>;
 type SecretUpdate = z.infer<typeof textUpdate>;
 type KeyUpdate = Pick<SecretUpdate, "apiKey" | "clearKey">;
 
-function serviceOrigin(baseUrl: string, speech = false): string {
-  if (!baseUrl) return speech ? "wss://dashscope.aliyuncs.com" : "";
+const loopbackHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+function serviceOrigin(baseUrl: string, service: "text" | SpeechProvider = "text"): string {
+  if (!baseUrl) {
+    if (service === "whisper-http") throw new SettingError("请填写兼容转写服务的地址。");
+    if (service === "seed") return "wss://openspeech.bytedance.com";
+    return service === "text" ? "" : "wss://dashscope.aliyuncs.com";
+  }
+  const webSocket = service !== "text" && service !== "whisper-http";
   try {
     const url = new URL(baseUrl);
-    const local = ["127.0.0.1", "localhost", "[::1]"].includes(url.hostname);
-    const allowed = speech ? url.protocol === "wss:" : url.protocol === "https:" || (local && url.protocol === "http:");
+    const allowed = webSocket
+      ? url.protocol === "wss:"
+      : url.protocol === "https:" || (loopbackHosts.has(url.hostname) && url.protocol === "http:");
     if (allowed && !url.username && !url.password && !url.search && !url.hash) return url.origin;
   } catch {
     // The field error below covers both malformed addresses and invalid protocols.
   }
-  throw new SettingError(speech ? "语音 API 地址须为有效的 wss:// 地址。" : "文本 API 地址须为有效的 HTTPS 地址或本机 HTTP 地址。");
+  throw new SettingError(webSocket ? "实时转写地址须使用 wss://。" : "API 地址须使用 HTTPS 或本机 HTTP。");
+}
+
+function keyOptional(provider: SpeechProvider, baseUrl: string) {
+  if (provider !== "whisper-http") return false;
+  try {
+    return loopbackHosts.has(new URL(serviceOrigin(baseUrl, provider)).hostname);
+  } catch {
+    return false;
+  }
+}
+
+function speechFamily(provider: SpeechProvider) {
+  return provider === "qwen-audio" ? "qwen" : provider;
 }
 
 export class SettingError extends Error {}
@@ -59,8 +85,12 @@ async function readSecret(encrypted?: string): Promise<string> {
   }
 }
 
-async function nextSecret(update: KeyUpdate, priorKey: string | undefined, sameService: boolean): Promise<string | undefined> {
+function validateKeyUpdate(update: KeyUpdate) {
   if (update.clearKey && update.apiKey) throw new SettingError("请取消移除密钥，或清空新输入的密钥。");
+}
+
+async function nextSecret(update: KeyUpdate, priorKey: string | undefined, sameService: boolean): Promise<string | undefined> {
+  validateKeyUpdate(update);
   if (update.clearKey) return undefined;
   if (!update.apiKey) {
     if (priorKey && !sameService) throw new SettingError("更换服务商地址时，请输入新密钥或移除之前保存的密钥。");
@@ -84,20 +114,23 @@ function publicSettings({ text, tasks, speech }: StoredSettings): PublicSettings
     if (tasks[task]) publicTasks[task] = publicText(tasks[task]);
   }
   const { provider, baseUrl, model, enabled, encryptedKey } = speech;
-  return { text: publicText(text), tasks: publicTasks, speech: { provider, baseUrl, model, enabled, hasKey: Boolean(encryptedKey) } };
+  const hasKey = Boolean(encryptedKey);
+  return { text: publicText(text), tasks: publicTasks, speech: { provider, baseUrl, model, enabled, hasKey, configured: hasKey || keyOptional(provider, baseUrl) } };
+}
+
+function sameTextService(protocol: StoredText["protocol"], origin: string, prior?: StoredText) {
+  return prior?.protocol === protocol && serviceOrigin(prior.baseUrl) === origin;
 }
 
 async function updateText(update: SecretUpdate, prior?: StoredText): Promise<StoredText> {
   const { protocol, baseUrl, model } = update;
-  const origin = serviceOrigin(baseUrl);
-  const sameService = prior?.protocol === protocol && serviceOrigin(prior.baseUrl) === origin;
-  const encryptedKey = await nextSecret(update, prior?.encryptedKey, sameService);
+  const encryptedKey = await nextSecret(update, prior?.encryptedKey, sameTextService(protocol, serviceOrigin(baseUrl), prior));
   return { protocol, baseUrl, model, encryptedKey };
 }
 
 const defaults: StoredSettings = {
   version: 1,
-  text: { ...QWEN_COMPATIBLE_PRESET },
+  text: { protocol: "compatible", baseUrl: "", model: "" },
   tasks: {},
   speech: { provider: "qwen-audio", baseUrl: "", model: "", enabled: false },
 };
@@ -148,7 +181,8 @@ export function createSettings(directory: string) {
         if (update.speech) {
           const { provider, baseUrl, model, enabled } = update.speech;
           const prior = previous.speech;
-          const sameService = serviceOrigin(baseUrl, true) === serviceOrigin(prior.baseUrl, true);
+          const origin = serviceOrigin(baseUrl, provider);
+          const sameService = speechFamily(provider) === speechFamily(prior.provider) && origin === serviceOrigin(prior.baseUrl, prior.provider);
           const encryptedKey = await nextSecret(update.speech, prior.encryptedKey, sameService);
           next.speech = { provider, baseUrl, model, enabled: enabled ?? (prior.enabled || Boolean(encryptedKey)), encryptedKey };
         }
@@ -164,12 +198,28 @@ export function createSettings(directory: string) {
       const { protocol, baseUrl, model, encryptedKey } = (task && settings.tasks[task]) || settings.text;
       return { protocol, baseUrl, model, apiKey: await readSecret(encryptedKey) };
     },
+    async textConnection(input: unknown, task?: TextTask): Promise<Omit<TextProfile, "model">> {
+      const parsed = textConnection.safeParse(input);
+      if (!parsed.success) throw new SettingError("请选择接口格式并填写有效的 API 地址。");
+      const draft = parsed.data;
+      validateKeyUpdate(draft);
+      const { protocol, baseUrl } = draft;
+      const origin = serviceOrigin(baseUrl);
+      if (draft.apiKey || draft.clearKey) return { protocol, baseUrl, apiKey: draft.apiKey || "" };
+      await pending;
+      const settings = await read();
+      // A new task override is its own profile, including its credential.
+      const prior = task ? settings.tasks[task] : settings.text;
+      const apiKey = sameTextService(protocol, origin, prior) ? await readSecret(prior?.encryptedKey) : "";
+      return { protocol, baseUrl, apiKey };
+    },
     async speech(requireEnabled: boolean) {
       await pending;
       const { provider, baseUrl, model, enabled, encryptedKey } = (await read()).speech;
-      if (requireEnabled && !enabled) throw new SettingError("请先在设置中启用在线语音识别。");
+      if (requireEnabled && !enabled) throw new SettingError("请先在设置中启用语音识别。");
+      serviceOrigin(baseUrl, provider);
       const apiKey = await readSecret(encryptedKey);
-      if (!apiKey) throw new SettingError("请先在设置中填写语音识别 API 密钥。");
+      if (!apiKey && !keyOptional(provider, baseUrl)) throw new SettingError("请填写所选语音服务的 API Key。");
       return { protocol: provider, baseUrl, model, apiKey };
     },
   };

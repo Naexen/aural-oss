@@ -10,7 +10,7 @@ import { openAsr, testAsr } from "./asr";
 import type { AsrEvent, OverlayState } from "./bridge-types";
 import { channels } from "./channels";
 import { createSettings, SettingError, textTask } from "./settings";
-import { runText, testText, TextModelError } from "./text";
+import { listTextModels, runText, testText, TextModelError } from "./text";
 
 const home = "aural://app/index.html";
 const contents = new Map([
@@ -260,6 +260,18 @@ function registerIpc() {
     } catch (error) {
       if (error instanceof TextModelError || error instanceof SettingError) throw error;
       throw new Error("文本模型连接测试失败，请重试。");
+    }
+  });
+  handle(channels.textModels, "main", async (input, kind) => {
+    const task = parse(textTask.optional(), kind);
+    try {
+      const profile = await settings.textConnection(input, task);
+      const models = await listTextModels(profile);
+      return models.filter((model) => model !== profile.apiKey &&
+        (profile.apiKey.length < 12 || !model.includes(profile.apiKey)));
+    } catch (error) {
+      if (error instanceof TextModelError || error instanceof SettingError) throw error;
+      throw new Error("读取模型列表失败，请检查接口设置。");
     }
   });
   handle(channels.copyDraft, "main", (text) => clipboard.writeText(parse(draftText, text)));

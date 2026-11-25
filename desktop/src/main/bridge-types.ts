@@ -1,8 +1,9 @@
 import type { AnswerEvaluation, InterviewBrief, InterviewRequest } from "../../../src/lib/human-interview/contracts";
 
 export type TextTask = "prepare" | "suggest" | "score" | "polish";
-export type TextProtocol = "compatible" | "gemini";
-export type SpeechProvider = "qwen" | "qwen-audio";
+export type TextProtocol = "compatible" | "anthropic" | "gemini";
+export const speechProviders = ["qwen-audio", "seed", "whisper-http", "qwen"] as const;
+export type SpeechProvider = typeof speechProviders[number];
 
 export interface PublicTextProfile {
   protocol: TextProtocol;
@@ -17,6 +18,7 @@ export interface PublicSpeechProfile {
   model: string;
   enabled: boolean;
   hasKey: boolean;
+  configured: boolean;
 }
 
 export interface PublicSettings {
@@ -26,9 +28,13 @@ export interface PublicSettings {
 }
 
 type SecretUpdate = { apiKey?: string; clearKey?: boolean };
+export type TextConnectionDraft = {
+  protocol: "compatible" | "anthropic";
+  baseUrl: string;
+} & SecretUpdate;
 
 export type SettingsTextUpdate = Omit<PublicTextProfile, "hasKey"> & SecretUpdate;
-export type SettingsSpeechUpdate = Omit<PublicSpeechProfile, "hasKey" | "enabled"> & { enabled?: boolean } & SecretUpdate;
+export type SettingsSpeechUpdate = Omit<PublicSpeechProfile, "hasKey" | "enabled" | "configured"> & { enabled?: boolean } & SecretUpdate;
 
 export interface SettingsUpdate {
   text?: SettingsTextUpdate;
@@ -79,6 +85,7 @@ export interface DesktopBridge {
   saveSettings(update: SettingsUpdate): Promise<PublicSettings>;
   runText<T extends TextTask>(task: T, input: TextInputs[T]): Promise<TextResults[T]>;
   testText(task?: TextTask): Promise<{ ok: true }>;
+  listTextModels(connection: TextConnectionDraft, task?: TextTask): Promise<string[]>;
   copyDraft(text: string): Promise<void>;
   testAsr(): Promise<void>;
   startAsr(options: { language?: string }): Promise<void>;

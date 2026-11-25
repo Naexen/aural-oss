@@ -145,6 +145,26 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; display: grid; gap: 1
 fieldset:disabled { opacity: .55; }
 .check { min-height: 24px; gap: 6px; font-size: 13px; }
 .check input { accent-color: var(--accent); width: 14px; height: 14px; }
+.speech-switch input {
+  appearance: none; width: 33px; height: 19px; margin: 0 3px 0 0; border-radius: 20px;
+  border: 0; padding: 2px; background: #c4cad4; cursor: pointer;
+}
+.speech-switch input::before {
+  content: ""; display: block; width: 15px; height: 15px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 2px #0003; transition: transform .15s ease;
+}
+.speech-switch input:checked { background: var(--accent); }
+.speech-switch input:checked::before { transform: translateX(14px); }
+.provider-profile, .advanced-settings-fields { display: grid; gap: 11px; }
+.model-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.advanced-settings { border: 1px solid var(--line); border-radius: 8px; background: #f7f8fb; }
+.advanced-settings summary {
+  display: flex; align-items: center; gap: 7px; min-height: 34px; padding: 6px 8px;
+  cursor: pointer; list-style: none; font-size: 12px; color: #364052;
+}
+.advanced-settings summary::-webkit-details-marker { display: none; }
+.advanced-settings[open] summary svg { transform: rotate(90deg); }
+.advanced-settings-fields { padding: 0 8px 8px; }
 .settings-modal, .question-modal {
   border: 1px solid #d9dee7; border-radius: 15px; box-shadow: 0 10px 45px #192b5030;
   padding: 0; width: min(calc(100vw - 30px), 630px); color: inherit; max-height: calc(100vh - 30px);

@@ -13,6 +13,7 @@ const bridge: DesktopBridge = {
   saveSettings: (update) => ipcRenderer.invoke(channels.settingsSave, update),
   runText: (task, input) => ipcRenderer.invoke(channels.textRun, task, input),
   testText: (task) => ipcRenderer.invoke(channels.textTest, task),
+  listTextModels: (connection, task) => ipcRenderer.invoke(channels.textModels, connection, task),
   copyDraft: (text) => ipcRenderer.invoke(channels.copyDraft, text),
   testAsr: () => ipcRenderer.invoke(channels.asrTest),
   startAsr: (options) => ipcRenderer.invoke(channels.asrStart, options),

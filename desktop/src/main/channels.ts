@@ -3,6 +3,7 @@ export const channels = {
   settingsSave: "aural:settings:save",
   textRun: "aural:text:run",
   textTest: "aural:text:test",
+  textModels: "aural:text:models",
   copyDraft: "aural:draft:copy",
   asrStart: "aural:asr:start",
   asrAudio: "aural:asr:audio",

@@ -1,6 +1,6 @@
 import type { AnswerEvaluation, InterviewBrief, InterviewQuestion } from "../../../src/lib/human-interview/contracts";
 import { getCandidateEvidence, type SpeakerRole, type TranscriptSegment } from "../../../src/lib/human-interview/transcript";
-import type { AsrEvent, OverlayAction, OverlayState, PublicSettings, TextInputs, TextResults, TextTask } from "../main/bridge-types";
+import type { AsrEvent, OverlayAction, OverlayState, PublicSettings, SpeechProvider, TextInputs, TextResults, TextTask } from "../main/bridge-types";
 import { openMicrophone } from "./mic";
 import { showSettings } from "./settings";
 import { elapsed, escapeHtml as h, icon, message } from "./ui";
@@ -46,13 +46,19 @@ function startWorkspace() {
   let polished = "";
   let ending = false;
   let mic: "off" | "opening" | "local" | "streaming" = "off";
+  let activeSpeech: SpeechProvider | undefined;
   let micGeneration = 0;
   let microphone: Awaited<ReturnType<typeof openMicrophone>> | undefined;
   let stoppingMic: Promise<void> | undefined;
   const segmentTurns = new Map<string, Turn>();
   const current = () => turns[index];
   const micEngaged = () => mic === "local" || mic === "streaming";
-  const micStatus = () => ({ off: "麦克风关闭", opening: "正在连接", local: "麦克风开启 · 本地监听", streaming: "实时转写中" })[mic];
+  const micStatus = () => ({
+    off: "麦克风关闭",
+    opening: "正在连接",
+    local: "麦克风开启 · 本地监听",
+    streaming: activeSpeech === "whisper-http" ? "分段转写中" : "实时转写中",
+  })[mic];
   const hasEvidence = () => Boolean(current() && getCandidateEvidence(current().entries).length);
   const activeSuggestion = () => current()?.suggestion ?? current()?.evaluation;
   const next = () => turns.find((turn) => turn.question.id === activeSuggestion()?.nextQuestionId);
@@ -324,9 +330,11 @@ function startWorkspace() {
         return;
       }
       microphone = opened;
-      if (settings?.speech.enabled && settings.speech.hasKey) {
+      const speech = settings?.speech;
+      if (speech?.enabled && speech.configured) {
         await bridge.startAsr({ language: "zh" });
         if (micGeneration !== generation) return;
+        activeSpeech = speech.provider;
         mic = "streaming";
       } else {
         mic = "local";
