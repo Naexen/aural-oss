@@ -70,15 +70,20 @@ export interface OverlayState {
   feedback?: string | null;
   score?: number | null;
   listening?: boolean;
+  micListening?: boolean;
   busy?: boolean;
   canScore?: boolean;
   canSuggest?: boolean;
 }
 
-export type AsrEvent =
+export type AudioSource = "mic" | "meeting";
+export type MeetingApp = { id: string; name: string; title: string };
+
+export type AsrEvent = (
   | { type: "interim" | "final"; id: string; text: string }
   | { type: "status"; status: "connecting" | "ready" | "stopped" }
-  | { type: "error"; message: string };
+  | { type: "error"; message: string }
+) & { source?: AudioSource };
 
 export interface DesktopBridge {
   getSettings(): Promise<PublicSettings>;
@@ -91,6 +96,9 @@ export interface DesktopBridge {
   startAsr(options: { language?: string }): Promise<void>;
   sendAsrAudio(pcm: ArrayBuffer): void;
   stopAsr(): Promise<void>;
+  listMeetingApps(): Promise<MeetingApp[]>;
+  startMeetingAudio(id: string): Promise<void>;
+  stopMeetingAudio(): Promise<void>;
   onAsrEvent(listener: (event: AsrEvent) => void): () => void;
   setOverlayOpen(open: boolean): Promise<void>;
   setOverlayCompact(compact: boolean): Promise<void>;

@@ -6,9 +6,10 @@ import {
   type IpcMainEvent, type IpcMainInvokeEvent, type Session,
 } from "electron";
 import { z } from "zod";
-import { openAsr, testAsr } from "./asr";
-import type { AsrEvent, OverlayState } from "./bridge-types";
+import { openAsr, testAsr, type AsrConnection, type AsrProfile } from "./asr";
+import type { AsrEvent, AudioSource, OverlayState } from "./bridge-types";
 import { channels } from "./channels";
+import { createMeetingAudio, type MeetingCapture, type MeetingTarget } from "./meeting-audio";
 import { createSettings, SettingError, textTask } from "./settings";
 import { listTextModels, runText, testText, TextModelError } from "./text";
 
@@ -38,19 +39,27 @@ const overlayStateSchema = z.object({
   feedback: z.string().max(1800).nullish(),
   score: z.number().int().min(1).max(5).nullish(),
   listening: z.boolean().optional(),
+  micListening: z.boolean().optional(),
   busy: z.boolean().optional(),
   canScore: z.boolean().optional(),
   canSuggest: z.boolean().optional(),
 });
 const overlayActions = z.enum(["mic", "suggest", "score", "next", "show-main"]);
 const asrOptions = z.strictObject({ language: z.string().max(30).optional() });
+const meetingAppId = z.uuid();
 const draftText = z.string().min(1).max(32_768).refine((text) => text.trim().length > 0);
 type View = "main" | "overlay";
 type IpcEvent = IpcMainEvent | IpcMainInvokeEvent;
 type Capture = {
-  client?: Awaited<ReturnType<typeof openAsr>>;
-  stopping: boolean;
+  source: AudioSource;
   id: string;
+  target?: MeetingTarget;
+  client?: AsrConnection;
+  meeting?: MeetingCapture;
+  starting?: Promise<void>;
+  stopping?: Promise<void>;
+  startupFailure?: Error;
+  ready: boolean;
 };
 
 process.umask(0o077);
@@ -71,7 +80,10 @@ let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
 let desktopSession: Session;
 let overlayState: OverlayState | null = null;
-let capture: Capture | null = null;
+const captures: Partial<Record<AudioSource, Capture>> = {};
+const meetingAudio = createMeetingAudio(path.join(
+  app.isPackaged ? process.resourcesPath : __dirname, "native", "aural-meeting-audio.exe",
+));
 
 function appUrl(value: string) {
   try {
@@ -220,24 +232,119 @@ function sizeOverlay(small: boolean) {
 }
 
 function sendAsr(event: AsrEvent) {
-  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channels.asrEvent, event);
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const receiver = mainWindow.webContents;
+  if (receiver.isDestroyed() || receiver.isCrashed()) {
+    abortCaptures();
+    return;
+  }
+  try {
+    receiver.send(channels.asrEvent, event);
+  } catch {
+    abortCaptures();
+  }
 }
 
 function reportStopped(current: Capture) {
-  if (capture !== current) return;
-  capture = null;
-  sendAsr({ type: "status", status: "stopped" });
+  if (captures[current.source] !== current) return;
+  delete captures[current.source];
+  sendAsr({ type: "status", status: "stopped", source: current.source });
 }
 
-async function stopCapture() {
-  const current = capture;
-  if (!current) return;
-  current.stopping = true;
-  if (current.client) {
-    current.client.close();
-    await current.client.closed;
+function stopCapture(source: AudioSource) {
+  const current = captures[source];
+  if (!current) return Promise.resolve();
+  current.stopping ??= Promise.resolve().then(async () => {
+    if (current.meeting) {
+      current.meeting.stop();
+      await current.meeting.closed;
+    }
+    if (current.client) {
+      current.client.close();
+      await current.client.closed;
+    }
+    reportStopped(current);
+  });
+  return current.stopping;
+}
+
+function abortCaptures() {
+  for (const source of ["mic", "meeting"] as const) {
+    const current = captures[source];
+    delete captures[source];
+    current?.meeting?.terminate();
+    current?.client?.close();
   }
-  reportStopped(current);
+}
+
+function startCapture(source: AudioSource, loadProfile: () => Promise<AsrProfile>, target?: MeetingTarget) {
+  const previous = captures[source];
+  if (previous) {
+    if (previous.stopping) throw new Error("此路音频正在结束，请稍后再开启。");
+    if (target && (previous.target?.pid !== target.pid || previous.target.startedAt !== target.startedAt)) {
+      throw new Error("请先停止当前会议音频，再切换应用。");
+    }
+    return previous.starting;
+  }
+
+  const current: Capture = { source, id: randomUUID(), target, ready: false };
+  captures[source] = current;
+  const isCurrent = () => captures[source] === current;
+  sendAsr({ type: "status", status: "connecting", source });
+  current.starting = (async () => {
+    try {
+      const profile = await loadProfile();
+      if (!isCurrent() || current.stopping) return;
+      const client = await openAsr(profile, (event) => {
+        if (!isCurrent()) return;
+        if (event.type === "error") {
+          const message = event.text.slice(0, 500);
+          if (current.ready) sendAsr({ type: "error", message, source });
+          else if (!current.stopping) current.startupFailure = new Error(message);
+          void stopCapture(source);
+          return;
+        }
+        const id = `${current.id}-${createHash("sha256").update(event.id).digest("hex").slice(0, 16)}`;
+        sendAsr({ type: event.type === "partial" ? "interim" : "final", id, text: event.text.slice(0, 1800), source });
+      });
+      if (!isCurrent() || current.stopping) {
+        client.close();
+        if (current.startupFailure) throw current.startupFailure;
+        return;
+      }
+      current.client = client;
+      void client.closed.then(() => {
+        if (!isCurrent() || current.stopping) return;
+        if (!current.ready) current.startupFailure = new Error("语音识别服务未完成连接，请重试。");
+        void stopCapture(source);
+      });
+      if (target) {
+        const meeting = meetingAudio.start(target, (pcm) => { if (isCurrent()) client.write(pcm); });
+        current.meeting = meeting;
+        void meeting.closed.then(({ unexpected }) => {
+          if (!isCurrent() || current.stopping || !current.ready) return;
+          if (unexpected) sendAsr({ type: "error", message: "会议音频已中断，请确认所选应用仍在运行。", source });
+          void stopCapture(source);
+        });
+        await meeting.ready;
+        if (!isCurrent() || current.stopping) {
+          if (current.startupFailure) throw current.startupFailure;
+          return;
+        }
+      }
+      current.ready = true;
+      sendAsr({ type: "status", status: "ready", source });
+    } catch (error) {
+      if (current.startupFailure) {
+        await current.stopping;
+        throw current.startupFailure;
+      }
+      if (!isCurrent() || current.stopping) return;
+      await stopCapture(source);
+      throw error;
+    }
+  })();
+  return current.starting;
 }
 
 function registerIpc() {
@@ -276,40 +383,19 @@ function registerIpc() {
   });
   handle(channels.copyDraft, "main", (text) => clipboard.writeText(parse(draftText, text)));
   handle(channels.asrTest, "main", async () => testAsr(await settings.speech(false)));
-  handle(channels.asrStart, "main", async (input) => {
+  handle(channels.asrStart, "main", (input) => {
     parse(asrOptions, input);
-    if (capture && !capture.stopping) return;
-    const current: Capture = { id: randomUUID(), stopping: false };
-    capture = current;
-    sendAsr({ type: "status", status: "connecting" });
-    try {
-      const profile = await settings.speech(true);
-      if (capture !== current || current.stopping) return;
-      const client = await openAsr(profile, (event) => {
-        if (capture !== current) return;
-        if (event.type === "error") {
-          sendAsr({ type: "error", message: event.text.slice(0, 500) });
-          void stopCapture();
-          return;
-        }
-        const id = `${current.id}-${createHash("sha256").update(event.id).digest("hex").slice(0, 16)}`;
-        sendAsr({ type: event.type === "partial" ? "interim" : "final", id, text: event.text.slice(0, 1800) });
-      });
-      if (capture !== current || current.stopping) {
-        client.close();
-        return;
-      }
-      current.client = client;
-      void client.closed.then(() => reportStopped(current));
-      sendAsr({ type: "status", status: "ready" });
-    } catch (error) {
-      if (capture !== current || current.stopping) return;
-      await stopCapture();
-      throw error;
-    }
+    return startCapture("mic", () => settings.speech(true));
   });
-  handle(channels.asrStop, "main", stopCapture);
+  handle(channels.asrStop, "main", () => stopCapture("mic"));
+  handle(channels.meetingList, "main", () => meetingAudio.list());
+  handle(channels.meetingStart, "main", (id) => {
+    const target = meetingAudio.target(parse(meetingAppId, id));
+    return startCapture("meeting", () => settings.speech(true), target);
+  });
+  handle(channels.meetingStop, "main", () => stopCapture("meeting"));
   ipcMain.on(channels.asrAudio, (event, value: unknown) => {
+    const capture = captures.mic;
     if (!ownsView(event, "main") || !capture?.client || capture.stopping) return;
     if (!(value instanceof ArrayBuffer) || value.byteLength === 0 || value.byteLength > 128 * 1024 || value.byteLength % 2) return;
     capture.client.write(new Uint8Array(value));
@@ -351,11 +437,15 @@ async function start() {
     backgroundColor: "#f8fafc",
   });
   mainWindow = window;
+  window.webContents.on("render-process-gone", abortCaptures);
+  window.webContents.on("destroyed", abortCaptures);
+  window.webContents.on("did-start-navigation", (event) => {
+    if (event.isMainFrame && !event.isSameDocument) abortCaptures();
+  });
   window.on("closed", () => {
     mainWindow = null;
     overlayState = null;
-    void stopCapture();
-    capture = null;
+    abortCaptures();
     closeOverlay();
   });
   await load();
@@ -365,6 +455,7 @@ async function start() {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
+  app.on("before-quit", abortCaptures);
   app.on("second-instance", showMain);
   app.on("window-all-closed", () => app.quit());
   void app.whenReady().then(start).catch(() => {

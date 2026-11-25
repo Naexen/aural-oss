@@ -79,6 +79,13 @@ h2 { font-size: 16px; }
 .intake summary .optional { margin-left: auto; font-weight: 400; }
 .intake[open] summary > svg:last-child { transform: rotate(90deg); }
 .intake-body { padding: 0 14px 14px; display: grid; gap: 10px; }
+.audio-sources { margin-top: 0; }
+.audio-sources summary > svg:last-child { margin-left: auto; }
+.audio-source-fields { display: grid; gap: 4px; padding: 2px 14px 12px; }
+.audio-source-fields .mic-switch { width: 100%; padding: 7px 0; border: 0; border-radius: 0; }
+.audio-source-fields .mic-switch + .mic-switch { border-top: 1px solid var(--line); }
+.meeting-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: end; }
+.meeting-picker select { min-width: 0; text-overflow: ellipsis; }
 .start-button { width: min(100%, 330px); min-height: 49px; margin: 22px 0 16px; font-size: 17px; border-radius: 12px; box-shadow: 0 3px 10px #075cff1c; }
 .ready { margin-top: 17px; color: #596270; font-size: 12px; }
 .start-card .notice:empty { display: none; }
@@ -100,12 +107,16 @@ h2 { font-size: 16px; }
 .panel-header { padding: 15px 16px; display: flex; justify-content: space-between; align-items: center; gap: 8px; }
 .caption { margin-top: 4px; font-size: 11px; color: var(--muted); }
 .capture-tools { display: flex; align-items: center; gap: 10px; }
+.capture-roles { display: grid; gap: 4px; }
+.capture-roles .input-role { white-space: nowrap; }
 .capture-tools progress { height: 8px; width: 49px; accent-color: var(--accent); }
 .capture-tools .input-role { align-items: center; display: flex; gap: 6px; font-size: 11px; color: var(--muted); }
 .input-role select { padding: 4px 3px; min-height: 28px; font-size: 12px; color: #182030; }
 .transcript-list { min-height: 185px; max-height: max(230px, calc(100vh - 350px)); overflow-y: auto; scrollbar-width: thin; border-top: 1px solid #edf0f3; }
 .segment { padding: 11px 16px; border-bottom: 1px solid #f0f2f5; overflow-wrap: anywhere; }
 .segment p { font-size: 13px; margin: 6px 0 1px; line-height: 1.6; white-space: pre-wrap; }
+.segment-tags { display: flex; align-items: center; gap: 7px; color: var(--muted); }
+.segment-tags small { font-size: 11px; }
 .partial { opacity: .69; }
 .segment-role { display: inline-flex; }
 .segment-role select, .role-chip {
@@ -183,6 +194,7 @@ dialog::backdrop { background: #3c4e6a35; }
 .settings-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 12px; }
 .settings-actions small { margin-right: auto; overflow-wrap: anywhere; color: var(--muted); }
 .question-modal { width: min(calc(100vw - 30px), 430px); }
+.meeting-modal { width: min(calc(100vw - 30px), 500px); }
 .question-modal form { padding: 18px; display: grid; gap: 11px; }
 
 .overlay-page, .overlay-page #app { height: 100vh; overflow: hidden; background: #fff; }

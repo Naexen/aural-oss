@@ -1,6 +1,6 @@
 import type { AnswerEvaluation, InterviewBrief, InterviewQuestion } from "../../../src/lib/human-interview/contracts";
 import { getCandidateEvidence, type SpeakerRole, type TranscriptSegment } from "../../../src/lib/human-interview/transcript";
-import type { AsrEvent, OverlayAction, OverlayState, PublicSettings, SpeechProvider, TextInputs, TextResults, TextTask } from "../main/bridge-types";
+import type { AsrEvent, DesktopBridge, OverlayAction, OverlayState, PublicSettings, SpeechProvider, TextInputs, TextResults, TextTask } from "../main/bridge-types";
 import { openMicrophone } from "./mic";
 import { showSettings } from "./settings";
 import { elapsed, escapeHtml as h, icon, message } from "./ui";
@@ -8,9 +8,12 @@ import { elapsed, escapeHtml as h, icon, message } from "./ui";
 const app = document.querySelector<HTMLElement>("#app")!;
 const bridge = window.auralDesktop;
 const roles = { unknown: "待确认", interviewer: "面试官", candidate: "候选人" } as const;
+const audioLabels = { mic: "本机麦克风", meeting: "会议音频" } as const;
+type InterviewEntry = TranscriptSegment & { source?: keyof typeof audioLabels };
+type MeetingApp = Awaited<ReturnType<DesktopBridge["listMeetingApps"]>>[number];
 type Turn = {
   question: InterviewQuestion;
-  entries: TranscriptSegment[];
+  entries: InterviewEntry[];
   evaluation?: AnswerEvaluation;
   suggestion?: TextResults["suggest"];
 };
@@ -34,11 +37,18 @@ function startWorkspace() {
   let turns: Turn[] = [];
   let index = 0;
   let intakeOpen = false;
+  let audioSourcesOpen = true;
   let jobDescription = "";
   let resume = "";
   let brief: InterviewBrief | undefined;
   let startWithMic = false;
+  let startWithMeeting = false;
+  let homeApps: MeetingApp[] = [];
+  let homeMeetingId = "";
+  let loadingHomeApps = false;
+  let homeAppsError = "";
   let role: SpeakerRole = "unknown";
+  let meetingRole: SpeakerRole = "unknown";
   let entry = "";
   let notice = "";
   let issue = false;
@@ -50,9 +60,13 @@ function startWorkspace() {
   let micGeneration = 0;
   let microphone: Awaited<ReturnType<typeof openMicrophone>> | undefined;
   let stoppingMic: Promise<void> | undefined;
+  let meeting: { app: MeetingApp; status: "opening" | "streaming" | "closing" } | undefined;
+  let meetingGeneration = 0;
+  let stoppingMeeting: Promise<void> | undefined;
   const segmentTurns = new Map<string, Turn>();
   const current = () => turns[index];
   const micEngaged = () => mic === "local" || mic === "streaming";
+  const meetingEngaged = () => meeting?.status === "streaming";
   const micStatus = () => ({
     off: "麦克风关闭",
     opening: "正在连接",
@@ -90,10 +104,23 @@ function startWorkspace() {
     return `<main class="home"><section class="start-card">
       <div class="hero-icon">${icon("mic", 42)}</div>
       <button class="button primary start-button" type="button" data-action="start">${icon("mic")}开始面试</button>
-      <label class="mic-switch">
-        <span>${icon("mic")}开场时开启本机麦克风</span>
-        <input type="checkbox" role="switch" id="start-mic" ${startWithMic ? "checked" : ""}>
-      </label>
+      <details class="intake audio-sources" ${audioSourcesOpen ? "open" : ""}>
+        <summary>${icon("mic")}<span>音频来源</span>${icon("chevron", 15)}</summary>
+        <div class="audio-source-fields">
+          <label class="mic-switch">
+            <span>本机麦克风</span>
+            <input type="checkbox" role="switch" id="start-mic" aria-label="开场时开启本机麦克风" ${startWithMic ? "checked" : ""}>
+          </label>
+          <label class="mic-switch">
+            <span>会议应用</span>
+            <input type="checkbox" role="switch" id="start-meeting" aria-label="开场时连接会议应用" ${startWithMeeting ? "checked" : ""}>
+          </label>
+          ${startWithMeeting ? `<div class="meeting-picker">
+            <select id="start-meeting-app" aria-label="选择会议应用" ${loadingHomeApps ? "disabled" : ""}>${meetingOptions(homeApps, homeMeetingId, loadingHomeApps)}</select>
+            <button type="button" class="button" data-action="refresh-meeting-apps" ${loadingHomeApps ? "disabled" : ""}>刷新</button>
+          </div>${homeAppsError ? `<small class="error" role="status">${h(homeAppsError)}</small>` : ""}` : ""}
+        </div>
+      </details>
       <details class="intake" ${intakeOpen ? "open" : ""}>
         <summary>${icon("folder")}<span>面试资料</span><span class="muted optional">选填</span>${icon("chevron", 15)}</summary>
         <div class="intake-body">
@@ -111,8 +138,9 @@ function startWorkspace() {
   function transcriptRows(turn: Turn) {
     if (!turn.entries.length) return `<div class="empty-note">本题暂无转写</div>`;
     return turn.entries.map((segment) => `<article class="segment ${segment.finalized ? "" : "partial"}" data-transcript-id="${h(segment.id)}">
-      <label class="segment-role ${segment.role}"><select aria-label="更改此段说话人" data-segment="${h(segment.id)}">
+      <div class="segment-tags"><label class="segment-role ${segment.role}"><select aria-label="更改此段说话人" data-segment="${h(segment.id)}">
         ${roleOptions(segment.role)}</select></label>
+        ${segment.source ? `<small>${audioLabels[segment.source]}</small>` : ""}</div>
       <p>${h(segment.text)}</p>
     </article>`).join("");
   }
@@ -144,6 +172,8 @@ function startWorkspace() {
       <div class="session-bar"><div><div class="session-heading"><h1>面试中</h1><span class="timer" data-clock>${elapsed(start)}</span></div></div>
         <div class="session-tools">
           <button class="button ${micEngaged() ? "blue" : ""}" data-action="mic" type="button" ${ending ? "disabled" : ""}>${icon(micEngaged() ? "mic" : "micOff")} ${mic === "off" ? "开启麦克风" : "关闭麦克风"}</button>
+          <button class="button ${meetingEngaged() ? "blue" : ""}" data-action="meeting" type="button" ${ending || meeting?.status === "closing" ? "disabled" : ""}>
+            ${icon("layers")}${meeting ? "关闭会议音频" : "连接会议音频"}</button>
           <button class="button" data-action="end" type="button" ${ending ? "disabled" : ""}>${icon("stop")}${ending ? "结束中…" : "结束面试"}</button>
         </div>
       </div>
@@ -154,9 +184,13 @@ function startWorkspace() {
       <div class="live-grid">
         <section class="panel transcript-panel" aria-labelledby="transcript-title">
           <header class="panel-header">
-            <div><h2 id="transcript-title">实时转写</h2><div class="caption"><span class="dot ${micEngaged() ? "green" : ""}"></span>${micStatus()}</div></div>
+            <div><h2 id="transcript-title">实时转写</h2><div class="caption"><span class="dot ${micEngaged() ? "green" : ""}"></span>${micStatus()}</div>
+              ${meeting ? `<div class="caption"><span class="dot ${meetingEngaged() ? "green" : ""}"></span>
+                <span>${meeting.status === "opening" ? "连接中" : meeting.status === "closing" ? "正在关闭" : "采集中"} · ${h(meeting.app.name)}</span>
+              </div>` : ""}</div>
             <div class="capture-tools"><progress value="0" max="1" id="mic-meter" aria-label="麦克风音量"></progress>
-            <label class="input-role">录入归属<select id="capture-role">${roleOptions(role)}</select></label></div>
+            <div class="capture-roles"><label class="input-role">录入归属<select id="capture-role">${roleOptions(role)}</select></label>
+              ${meeting ? `<label class="input-role">会议归属<select id="meeting-role">${roleOptions(meetingRole)}</select></label>` : ""}</div></div>
           </header>
           <div class="transcript-list" id="transcript-list">${transcriptRows(turn)}</div>
           <form id="manual-entry" class="manual-entry"><input id="entry" aria-label="添加转写" placeholder="补录一段发言" value="${h(entry)}" maxlength="1800">
@@ -194,12 +228,18 @@ function startWorkspace() {
     const currentTurn = phase === "idle" ? undefined : current();
     bridge.setOverlayState({
       phase,
-      status: phase === "live" ? micStatus() : phase === "ended" ? "面试结束" : "未开始",
+      status: phase === "live" && meetingEngaged() ? (micEngaged() ? "双音源采集中" : "会议音频采集中")
+        : phase === "live" ? micStatus() : phase === "ended" ? "面试结束" : "未开始",
       startedAt: start || undefined,
       endedAt: end || undefined,
-      listening: micEngaged(),
+      listening: micEngaged() || meetingEngaged(),
+      micListening: micEngaged(),
       question: currentTurn?.question.prompt,
-      transcript: currentTurn?.entries.slice(-12).map((item) => ({ label: roles[item.role], text: item.text, partial: !item.finalized })),
+      transcript: currentTurn?.entries.slice(-12).map((item) => ({
+        label: item.source ? `${roles[item.role]} · ${audioLabels[item.source]}` : roles[item.role],
+        text: item.text,
+        partial: !item.finalized,
+      })),
       score: currentTurn?.evaluation?.score,
       feedback: currentTurn?.evaluation?.feedback,
       followUp: activeSuggestion()?.followUp,
@@ -215,10 +255,13 @@ function startWorkspace() {
       <div class="toolbar-actions"><button class="button" data-action="settings" type="button">${icon("sliders")}模型设置</button>
       <button class="button" data-action="overlay" type="button">${icon("layers")}浮窗</button></div></header>
       ${phase === "idle" ? home() : phase === "live" ? live() : summary()}`;
-    app.querySelector("details")?.addEventListener("toggle", (event) => {
-      const details = event.currentTarget as HTMLDetailsElement;
-      if (details.isConnected) intakeOpen = details.open;
-    });
+    for (const details of app.querySelectorAll<HTMLDetailsElement>("details")) {
+      details.addEventListener("toggle", () => {
+        if (!details.isConnected) return;
+        if (details.classList.contains("audio-sources")) audioSourcesOpen = details.open;
+        else intakeOpen = details.open;
+      });
+    }
     publish();
   }
 
@@ -243,7 +286,15 @@ function startWorkspace() {
   }
 
   function applyAsr(event: AsrEvent) {
+    const source = event.source ?? "mic";
     if (event.type === "error") {
+      if (source === "meeting") {
+        if (phase === "live" && meeting) {
+          showNotice(`会议音频 · ${event.message}`, true);
+          void stopMeeting();
+        }
+        return;
+      }
       if (phase === "live" && mic !== "off") {
         mic = "local";
         render();
@@ -252,14 +303,18 @@ function startWorkspace() {
       return;
     }
     if (event.type === "status") {
-      if (event.status === "stopped" && mic === "streaming") {
+      if (event.status === "stopped" && source === "meeting" && meeting && meeting.status !== "closing") {
+        meeting = undefined;
+        render();
+      }
+      if (event.status === "stopped" && source === "mic" && mic === "streaming") {
         mic = "local";
         render();
       }
       return;
     }
     if (phase !== "live") return;
-    const id = `audio-${event.id}`.slice(0, 100);
+    const id = `${source}-${event.id}`.slice(0, 100);
     const turn = segmentTurns.get(id) ?? current();
     if (!turn) return;
     segmentTurns.set(id, turn);
@@ -268,7 +323,10 @@ function startWorkspace() {
     if (!event.text.trim()) {
       if (existing) turn.entries.splice(turn.entries.indexOf(existing), 1);
     } else {
-      const segment: TranscriptSegment = { id, role: existing?.role ?? role, text: event.text.slice(0, 1800), finalized: event.type === "final" };
+      const segment: InterviewEntry = {
+        id, source, role: existing?.role ?? (source === "meeting" ? meetingRole : role),
+        text: event.text.slice(0, 1800), finalized: event.type === "final",
+      };
       if (existing) turn.entries[turn.entries.indexOf(existing)] = segment;
       else turn.entries.push(segment);
       if (segment.finalized && segment.role === "candidate") invalidateReview(turn);
@@ -347,8 +405,130 @@ function startWorkspace() {
     render();
   }
 
+  async function refreshHomeApps() {
+    if (loadingHomeApps) return;
+    loadingHomeApps = true;
+    homeAppsError = "";
+    render();
+    try {
+      homeApps = await bridge.listMeetingApps();
+      if (!homeApps.some((item) => item.id === homeMeetingId)) homeMeetingId = "";
+      if (!homeApps.length) homeAppsError = "打开会议应用后刷新。";
+    } catch (error) {
+      homeApps = [];
+      homeMeetingId = "";
+      homeAppsError = message(error, "无法读取会议应用。");
+    } finally {
+      loadingHomeApps = false;
+      if (phase === "idle") render();
+    }
+  }
+
+  function speechReady() {
+    if (settings?.speech.enabled && settings.speech.configured) return true;
+    showNotice("请先配置并启用语音识别。");
+    openSettings(true);
+    return false;
+  }
+
+  function chooseMeeting() {
+    if (ending || phase !== "live") return;
+    if (meeting) {
+      void stopMeeting();
+      return;
+    }
+    if (!speechReady() || document.querySelector("#meeting-source-dialog")) return;
+    const dialog = document.createElement("dialog");
+    dialog.className = "question-modal meeting-modal";
+    dialog.id = "meeting-source-dialog";
+    dialog.setAttribute("aria-labelledby", "meeting-dialog-title");
+    dialog.innerHTML = `<form><h2 id="meeting-dialog-title">连接会议音频</h2>
+      <div class="meeting-picker">
+        <label>会议应用<select required>${meetingOptions([], "", true)}</select></label>
+        <button class="button" type="button" data-refresh>刷新</button>
+      </div>
+      <small class="muted" role="status"></small>
+      <div class="summary-actions"><button class="button" type="button" data-cancel>取消</button>
+        <button class="button primary" type="submit" disabled>连接</button></div></form>`;
+    document.body.append(dialog);
+    dialog.addEventListener("close", () => dialog.remove());
+    const form = dialog.querySelector("form")!;
+    const picker = form.querySelector("select")!;
+    const reload = form.querySelector<HTMLButtonElement>("[data-refresh]")!;
+    const connect = form.querySelector<HTMLButtonElement>("[type='submit']")!;
+    const status = form.querySelector("small")!;
+    let apps: MeetingApp[] = [];
+    async function refresh() {
+      reload.disabled = true;
+      picker.disabled = true;
+      connect.disabled = true;
+      status.textContent = "";
+      try {
+        apps = await bridge.listMeetingApps();
+        picker.innerHTML = meetingOptions(apps, picker.value);
+        if (!apps.length) status.textContent = "打开会议应用后刷新。";
+      } catch (error) {
+        apps = [];
+        picker.innerHTML = meetingOptions(apps, "");
+        status.textContent = message(error, "无法读取会议应用。");
+      } finally {
+        reload.disabled = false;
+        picker.disabled = false;
+        connect.disabled = !picker.value;
+      }
+    }
+    form.querySelector("[data-cancel]")?.addEventListener("click", () => dialog.close());
+    picker.addEventListener("change", () => { connect.disabled = !picker.value; });
+    reload.addEventListener("click", () => void refresh());
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const target = apps.find((item) => item.id === picker.value);
+      if (!target) return;
+      dialog.close();
+      void connectMeeting(target);
+    });
+    dialog.showModal();
+    void refresh();
+  }
+
+  async function connectMeeting(target: MeetingApp) {
+    if (phase !== "live" || ending || meeting || stoppingMeeting) return;
+    const generation = ++meetingGeneration;
+    meetingRole = "unknown";
+    meeting = { app: target, status: "opening" };
+    showNotice("");
+    render();
+    try {
+      await bridge.startMeetingAudio(target.id);
+      if (generation === meetingGeneration && meeting) meeting.status = "streaming";
+    } catch (error) {
+      if (generation !== meetingGeneration) return;
+      meeting = undefined;
+      showNotice(message(error, "会议音频连接失败。"), true);
+    }
+    render();
+  }
+
+  function stopMeeting() {
+    if (stoppingMeeting || !meeting) return stoppingMeeting;
+    meetingGeneration++;
+    meeting.status = "closing";
+    stoppingMeeting = bridge.stopMeetingAudio().catch((error) => {
+      showNotice(message(error, "会议音频关闭失败。"), true);
+    }).finally(() => {
+      meeting = undefined;
+      stoppingMeeting = undefined;
+      render();
+    });
+    render();
+    return stoppingMeeting;
+  }
+
   function startInterview() {
     if (phase !== "idle" || busy) return;
+    const meetingApp = startWithMeeting ? homeApps.find((item) => item.id === homeMeetingId) : undefined;
+    if (startWithMeeting && !meetingApp) { showNotice("请选择会议应用。", true); return; }
+    if (meetingApp && !speechReady()) return;
     turns = (brief?.agenda ?? quickQuestions).map((question) => ({ question, entries: [] }));
     index = 0;
     role = "unknown";
@@ -359,6 +539,7 @@ function startWorkspace() {
     phase = "live";
     render();
     if (startWithMic) void toggleMic();
+    if (meetingApp) void connectMeeting(meetingApp);
   }
 
   async function prepare() {
@@ -445,7 +626,7 @@ function startWorkspace() {
     if (phase !== "live" || ending) return;
     ending = true;
     showNotice("");
-    await stopMic();
+    await Promise.all([stopMic(), stopMeeting()]);
     end = Date.now();
     phase = "ended";
     ending = false;
@@ -459,6 +640,8 @@ function startWorkspace() {
       case "start": startInterview(); break;
       case "prepare": void prepare(); break;
       case "mic": void toggleMic(); break;
+      case "meeting": chooseMeeting(); break;
+      case "refresh-meeting-apps": void refreshHomeApps(); break;
       case "new-question": addQuestion(); break;
       case "score": void review("score"); break;
       case "suggest": void review("suggest"); break;
@@ -473,6 +656,10 @@ function startWorkspace() {
         resume = "";
         brief = undefined;
         intakeOpen = false;
+        startWithMeeting = false;
+        homeMeetingId = "";
+        homeApps = [];
+        homeAppsError = "";
         start = 0;
         end = 0;
         showNotice("");
@@ -509,7 +696,14 @@ function startWorkspace() {
   app.addEventListener("change", (event) => {
     const input = event.target as HTMLInputElement | HTMLSelectElement;
     if (input.id === "start-mic" && input instanceof HTMLInputElement) startWithMic = input.checked;
+    if (input.id === "start-meeting" && input instanceof HTMLInputElement) {
+      startWithMeeting = input.checked;
+      if (startWithMeeting) void refreshHomeApps();
+      else render();
+    }
+    if (input.id === "start-meeting-app") homeMeetingId = input.value;
     if (input.id === "capture-role") role = input.value as SpeakerRole;
+    if (input.id === "meeting-role") meetingRole = input.value as SpeakerRole;
     if (input.dataset.segment) {
       const turn = current();
       const item = turn.entries.find((segment) => segment.id === input.dataset.segment);
@@ -545,6 +739,11 @@ function startWorkspace() {
   void bridge.getSettings().then((value) => { settings = value; render(); }, (error) => showNotice(message(error), true));
 }
 
+function meetingOptions(apps: MeetingApp[], selected: string, loading = false) {
+  return `<option value="">${loading ? "正在查找应用…" : "选择会议应用"}</option>${apps.map(({ id, name, title }) =>
+    `<option value="${h(id)}" ${id === selected ? "selected" : ""}>${h(name === title ? name : `${name} · ${title}`)}</option>`).join("")}`;
+}
+
 function roleOptions(selected: SpeakerRole) {
   return (Object.keys(roles) as SpeakerRole[]).map((key) => `<option value="${key}" ${key === selected ? "selected" : ""}>${roles[key]}</option>`).join("");
 }
@@ -557,7 +756,8 @@ function startOverlay() {
 
   function render() {
     const live = state.phase === "live";
-    const status = live ? (state.listening ? "麦克风开启" : "面试中") : state.status;
+    const micListening = state.micListening ?? state.listening;
+    const status = live && !state.listening ? "面试中" : state.status;
     const clock = state.startedAt ? elapsed(state.startedAt, state.endedAt) : "00:00:00";
     app.innerHTML = `<main class="overlay-shell ${compact ? "is-compact" : ""}">
       <header class="overlay-heading"><span class="dot ${state.listening ? "green" : ""}"></span><strong>${h(status)}</strong>
@@ -570,7 +770,7 @@ function startOverlay() {
           <button data-tab="assessment" type="button" aria-pressed="${tab === "assessment"}">评估</button></div>
         <div class="overlay-feed">${tab === "transcript"
           ? (state.transcript?.length ? state.transcript.map((segment) => `<article class="overlay-segment ${segment.partial ? "partial" : ""}">
-                <span class="role-chip ${segment.label === "候选人" ? "blue" : ""}">${h(segment.label)}</span><p>${h(segment.text)}</p></article>`).join("") : `<div class="empty-note">${live ? "暂无转写" : h(state.status)}</div>`)
+                <span class="role-chip ${segment.label.startsWith("候选人") ? "blue" : ""}">${h(segment.label)}</span><p>${h(segment.text)}</p></article>`).join("") : `<div class="empty-note">${live ? "暂无转写" : h(state.status)}</div>`)
           : `${state.question ? `<div class="overlay-result"><div class="small-label">当前问题</div><p>${h(state.question)}</p></div>` : ""}
              ${state.feedback ? `<div class="overlay-result"><div class="small-label">本题暂评</div><strong>${state.score == null ? "证据不足" : `${state.score} / 5`}</strong><p>${h(state.feedback)}</p></div>` : ""}
              ${state.followUp ? `<div class="overlay-result"><div class="small-label">建议追问</div><p>${h(state.followUp)}</p></div>` : ""}
@@ -578,7 +778,7 @@ function startOverlay() {
                <button class="button compact-button" data-action="next" type="button">切换${icon("chevron", 14)}</button></div>` : ""}
              ${!state.question ? '<div class="empty-note">暂无评估</div>' : ""}`}</div>
         <footer class="overlay-actions">
-          <button class="icon-button ${state.listening ? "blue" : ""}" data-action="mic" type="button" aria-label="${state.listening ? "关闭麦克风" : "开启麦克风"}" ${live ? "" : "disabled"}>${icon(state.listening ? "mic" : "micOff")}</button>
+          <button class="icon-button ${micListening ? "blue" : ""}" data-action="mic" type="button" aria-label="${micListening ? "关闭麦克风" : "开启麦克风"}" ${live ? "" : "disabled"}>${icon(micListening ? "mic" : "micOff")}</button>
           <button class="button" data-action="suggest" type="button" ${state.canSuggest && !state.busy ? "" : "disabled"}>追问</button>
           <button class="button" data-action="score" type="button" ${state.canScore && !state.busy ? "" : "disabled"}>评本题</button>
           <button class="icon-button" data-action="show-main" type="button" aria-label="显示主窗口">${icon("layers")}</button>

@@ -16,6 +16,7 @@ async function copyDependencyLicenses() {
 
 await mkdir(fromDesktop("build/renderer"), { recursive: true });
 await Promise.all([
+  process.platform === "win32" ? import("../native/build.mjs") : undefined,
   build({
     absWorkingDir: desktop,
     entryPoints: { main: "src/main/index.ts", preload: "src/main/preload.ts" },
