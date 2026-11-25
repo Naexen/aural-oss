@@ -193,7 +193,7 @@ try {
   assert(await electron.evaluate(({ app }) => app.commandLine.hasSwitch("use-fake-device-for-media-stream")));
 
   const startButton = button(main, "开始面试");
-  const startMic = main.getByRole("switch", { name: "开始时开启电脑麦克风" });
+  const startMic = main.getByRole("switch", { name: "开场时开启本机麦克风", exact: true });
   const intakeSummary = exactText(main, "面试资料");
   await visible(startButton);
   assert.equal(await startButton.count(), 1);

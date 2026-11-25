@@ -91,8 +91,8 @@ function startWorkspace() {
       <div class="hero-icon">${icon("mic", 42)}</div>
       <button class="button primary start-button" type="button" data-action="start">${icon("mic")}开始面试</button>
       <label class="mic-switch">
-        <span>${icon("mic")}电脑麦克风</span>
-        <input type="checkbox" role="switch" id="start-mic" ${startWithMic ? "checked" : ""} aria-label="开始时开启电脑麦克风">
+        <span>${icon("mic")}开场时开启本机麦克风</span>
+        <input type="checkbox" role="switch" id="start-mic" ${startWithMic ? "checked" : ""}>
       </label>
       <details class="intake" ${intakeOpen ? "open" : ""}>
         <summary>${icon("folder")}<span>面试资料</span><span class="muted optional">选填</span>${icon("chevron", 15)}</summary>
