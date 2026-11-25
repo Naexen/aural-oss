@@ -1,0 +1,51 @@
+{
+  "name": "aural-interview-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Aural Interview for Windows",
+  "author": "Aural Interview",
+  "main": "build/main.cjs",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "npm run build && electron .",
+    "package:win": "install-electron && npm run build && electron-builder --win portable --x64",
+    "package:win:dir": "install-electron && npm run build && electron-builder --win --dir --x64"
+  },
+  "dependencies": {
+    "ws": "8.23.0",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "electron": "45.5.0",
+    "electron-builder": "26.18.0",
+    "esbuild": "0.28.2"
+  },
+  "build": {
+    "appId": "org.aural.interview",
+    "productName": "Aural Interview",
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "build/package"
+    },
+    "files": [
+      "build/main.cjs",
+      "build/preload.cjs",
+      "build/renderer/**",
+      "build/icon.ico",
+      "build/LICENSE",
+      "build/THIRD-PARTY-LICENSES.txt",
+      "package.json",
+      "!node_modules/**"
+    ],
+    "npmRebuild": false,
+    "win": {
+      "target": "portable",
+      "icon": "build/icon.ico",
+      "signExecutable": false,
+      "verifyUpdateCodeSignature": false
+    },
+    "portable": {
+      "artifactName": "Aural-Interview-${version}-win-${arch}.exe"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+export const channels = {
+  settingsGet: "aural:settings:get",
+  settingsSave: "aural:settings:save",
+  textRun: "aural:text:run",
+  textTest: "aural:text:test",
+  copyDraft: "aural:draft:copy",
+  asrStart: "aural:asr:start",
+  asrAudio: "aural:asr:audio",
+  asrStop: "aural:asr:stop",
+  asrTest: "aural:asr:test",
+  asrEvent: "aural:asr:event",
+  overlayOpen: "aural:overlay:open",
+  overlayCompact: "aural:overlay:compact",
+  overlayState: "aural:overlay:state",
+  overlayRead: "aural:overlay:read",
+  overlayAction: "aural:overlay:action",
+  overlayClose: "aural:overlay:close",
+} as const;
