@@ -2,7 +2,8 @@
 import { WebSocket } from "ws";
 import {
   BIGMODEL_ASR_URL, buildBigModelHeaders, buildBigModelFullRequest,
-  buildBigModelAudioRequest, parseAsrResponse, type BigModelAsrConfig, type AsrResponse,
+  buildBigModelAudioRequest, isSeedAsrAcknowledgement, parseAsrResponse, seedResponseError,
+  type BigModelAsrConfig, type AsrResponse,
 } from "./volcengine-asr";
 import {
   QWEN_ASR_URL, buildQwenSessionUpdate, buildQwenAudioAppend, buildQwenSessionFinish,
@@ -35,6 +36,7 @@ interface StreamingAsrOptions {
   url?: string;
   model?: string;
   maxPayload?: number;
+  seedAsync?: boolean;
 }
 
 type SocketFactory = (url: string, options: WebSocket.ClientOptions) => WebSocket;
@@ -97,14 +99,22 @@ export class StreamingAsrConnection {
           } else if (this.options.provider === "qwen-audio") {
             socket.send(JSON.stringify(buildQwenAudioTask(this.options.requestId, this.options.config.language, this.options.config.endWindowSize, this.options.config.corpus, this.options.noiseThreshold, this.options.model)));
           } else {
-            socket.send(buildBigModelFullRequest(this.options.config, this.options.requestId));
-            finish();
+            socket.send(buildBigModelFullRequest(this.options.config, this.options.requestId, this.options.seedAsync));
+            if (!this.options.seedAsync) finish();
           }
         } catch (error) { finish(error instanceof Error ? error : new Error("ASR configuration failed")); }
       };
-      const configured = (data: Buffer) => {
-        if (this.options.provider === "seed") return;
+      const configured = (data: Buffer, binary: boolean) => {
         try {
+          if (this.options.provider === "seed") {
+            if (!this.options.seedAsync) return;
+            if (!binary) throw new Error("Invalid Seed ASR configuration response");
+            const response = parseAsrResponse(data, this.options.maxPayload);
+            const error = seedResponseError(response);
+            if (error) finish(new Error(error));
+            else if (isSeedAsrAcknowledgement(response)) finish();
+            return;
+          }
           const event = JSON.parse(data.toString());
           if (this.options.provider === "qwen") {
             if (event.type === "session.updated") finish();
@@ -113,7 +123,7 @@ export class StreamingAsrConnection {
             if (event.header.event === "task-started") finish();
             else if (event.header.event === "task-failed") finish(new Error(event.header.error_message || "Qwen Audio ASR task rejected"));
           }
-        } catch { finish(new Error("Invalid Qwen ASR configuration response")); }
+        } catch { finish(new Error("Invalid ASR configuration response")); }
       };
       socket.on("open", opened).on("message", configured).on("error", failed)
         .on("close", closed).on("unexpected-response", rejected);
@@ -141,7 +151,7 @@ export class StreamingAsrConnection {
       ? parseQwenAsrResponse(this.qwenState, JSON.parse(data.toString()))
       : this.options.provider === "qwen-audio"
         ? parseQwenAudioAsrResponse(this.qwenAudioState, JSON.parse(data.toString()), this.options.requestId)
-        : parseAsrResponse(data);
+        : parseAsrResponse(data, this.options.maxPayload);
     if (response?.errorMessage) response.errorMessage = response.errorMessage.replaceAll(this.options.apiKey, "[redacted]");
     return response;
   }

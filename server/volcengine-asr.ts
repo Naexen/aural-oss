@@ -31,6 +31,8 @@ const SERIAL_JSON = 0b0001;
 const COMP_GZIP = 0b0001;
 
 export const BIGMODEL_ASR_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel";
+export const BIGMODEL_ASYNC_ASR_URL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async";
+export const SEED_ASR_RESOURCE = "volc.seedasr.sauc.duration";
 
 export interface BigModelAsrConfig {
   language?: string;
@@ -97,7 +99,7 @@ function buildHeader(
   return buf;
 }
 
-export function buildBigModelFullRequest(config: BigModelAsrConfig, uid: string): Buffer {
+export function buildBigModelFullRequest(config: BigModelAsrConfig, uid: string, asyncProtocol = false): Buffer {
   const header = buildHeader(CLIENT_FULL_REQUEST, FLAG_POS_SEQ, SERIAL_JSON, COMP_GZIP);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -106,7 +108,7 @@ export function buildBigModelFullRequest(config: BigModelAsrConfig, uid: string)
     enable_itn: config.enableItn ?? false,
     enable_punc: config.enablePunc ?? true,
     enable_ddc: config.enableDdc ?? false,
-    show_utterance: config.showUtterance ?? true,
+    [asyncProtocol ? "show_utterances" : "show_utterance"]: config.showUtterance ?? true,
     result_type: config.resultType || "single",
     vad_segment_duration: config.vadSegmentDuration ?? 3000,
     end_window_size: config.endWindowSize ?? 500,
@@ -120,7 +122,7 @@ export function buildBigModelFullRequest(config: BigModelAsrConfig, uid: string)
     format: config.format || "pcm",
     rate: config.rate || 16000,
     bits: config.bits || 16,
-    channels: config.channels || 1,
+    [asyncProtocol ? "channel" : "channels"]: config.channels || 1,
     codec: config.codec || "raw",
   };
   if (config.language) audio.language = config.language;
@@ -185,8 +187,21 @@ export interface AsrResponse {
   errorMessage?: string;
 }
 
-export function parseAsrResponse(data: Buffer): AsrResponse {
+export function seedResponseError(response: AsrResponse): string | undefined {
+  if (response.errorCode !== undefined) return response.errorMessage || `Seed ASR error ${response.errorCode}`;
+  if (response.code !== undefined && response.code !== 0 && response.code !== 20000000) {
+    return response.message || `Seed ASR error ${response.code}`;
+  }
+}
+
+export function isSeedAsrAcknowledgement(response: AsrResponse): boolean {
+  return !response.isLastPackage &&
+    (response.messageType === SERVER_ACK || (response.messageType === SERVER_FULL_RESPONSE && "text" in response));
+}
+
+export function parseAsrResponse(data: Buffer, maxOutputLength?: number): AsrResponse {
   if (!data || data.length < 4) return { messageType: 0 };
+  const gzipOptions = maxOutputLength === undefined ? undefined : { maxOutputLength };
 
   const messageType = data[1] >> 4;
   const flags = data[1] & 0x0f;
@@ -210,7 +225,9 @@ export function parseAsrResponse(data: Buffer): AsrResponse {
       if (payloadSize > 0) {
         let payloadBuf = body.subarray(4, 4 + payloadSize);
         if (compressionMethod === COMP_GZIP && payloadBuf.length > 0) {
-          try { payloadBuf = gunzipSync(payloadBuf); } catch { /* use raw */ }
+          try { payloadBuf = gunzipSync(payloadBuf, gzipOptions); } catch {
+            if (gzipOptions) return { messageType, errorCode: -2, errorMessage: "gzip decompression failed", sequence };
+          }
         }
         try { ackPayload = JSON.parse(payloadBuf.toString("utf-8")); } catch { /* ignore */ }
       }
@@ -230,7 +247,7 @@ export function parseAsrResponse(data: Buffer): AsrResponse {
       const msgSize = body.readUInt32BE(4);
       let msgBuf = body.subarray(8, 8 + msgSize);
       if (compressionMethod === COMP_GZIP && msgBuf.length > 0) {
-        try { msgBuf = gunzipSync(msgBuf); } catch { /* use raw */ }
+        try { msgBuf = gunzipSync(msgBuf, gzipOptions); } catch { /* use raw */ }
       }
       return { messageType, errorCode, errorMessage: msgBuf.toString("utf-8"), sequence };
     }
@@ -242,7 +259,7 @@ export function parseAsrResponse(data: Buffer): AsrResponse {
     let payloadBuf = body.subarray(4, 4 + payloadSize);
 
     if (compressionMethod === COMP_GZIP && payloadBuf.length > 0) {
-      try { payloadBuf = gunzipSync(payloadBuf); } catch {
+      try { payloadBuf = gunzipSync(payloadBuf, gzipOptions); } catch {
         return { messageType, errorCode: -2, errorMessage: "gzip decompression failed", sequence };
       }
     }
