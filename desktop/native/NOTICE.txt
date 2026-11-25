@@ -1,0 +1,11 @@
+Aural process audio helper
+
+The WASAPI activation and capture sequence is adapted from Microsoft's
+Application Loopback API Capture Sample, licensed under the MIT License.
+See LICENSE-Microsoft.txt for the upstream copyright and license.
+
+https://github.com/microsoft/Windows-classic-samples/tree/main/Samples/ApplicationLoopback
+
+The .NET Framework command wrapper uses only Windows system APIs. It selects
+the target process tree, validates the selected process identity, and streams
+16 kHz mono PCM through a pipe. It does not open a system-wide recording device.
