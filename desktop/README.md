@@ -1,6 +1,6 @@
-# Aural Interview 0.1.1
+# Aural Interview 0.1.2
 
-Windows x64 桌面版。双击 `Aural-Interview-0.1.1-win-x64.exe` 即可独立使用。
+Windows x64 桌面版。双击 `Aural-Interview-0.1.2-win-x64.exe` 即可独立使用。
 
 ## 使用
 

@@ -192,7 +192,18 @@ try {
   assert.equal(await electron.evaluate(({ app }) => app.getPath("userData")), userData);
   assert(await electron.evaluate(({ app }) => app.commandLine.hasSwitch("use-fake-device-for-media-stream")));
 
-  await visible(main.getByRole("heading", { name: "开始面试" }));
+  const startButton = button(main, "开始面试");
+  const startMic = main.getByRole("switch", { name: "开始时开启电脑麦克风" });
+  const intakeSummary = exactText(main, "面试资料");
+  await visible(startButton);
+  assert.equal(await startButton.count(), 1);
+  assert.equal(await exactText(main, "开始面试").filter({ visible: true }).count(), 1);
+  const [startBounds, micBounds, intakeBounds] = await Promise.all([
+    startButton.boundingBox(), startMic.boundingBox(), intakeSummary.boundingBox(),
+  ]);
+  assert(startBounds && micBounds && intakeBounds, "Expected the start button, microphone switch, and interview materials on the homepage.");
+  const startBottom = startBounds.y + startBounds.height;
+  assert(startBottom <= micBounds.y && startBottom <= intakeBounds.y, "Expected the start button above the microphone switch and interview materials.");
   assert.equal(await main.getByLabel("JD", { exact: true }).inputValue(), "");
   assert.equal(await main.getByLabel("简历", { exact: true }).inputValue(), "");
   assert.equal(requests.length, 0);
@@ -263,8 +274,8 @@ try {
   assert.equal(requests.length, 2);
   console.log("PASS two compatible text interfaces, real draft model discovery, default/per-task model selection and encrypted storage");
 
-  await main.getByRole("switch", { name: "开始时开启电脑麦克风" }).check();
-  await button(main, "开始面试").click();
+  await startMic.check();
+  await startButton.click();
   await visible(main.getByRole("heading", { name: "面试中" }));
   await visible(exactText(main, "麦克风开启 · 本地监听"));
   await main.waitForFunction(() => document.querySelector("#mic-meter")?.value > 0, undefined, { timeout: 12_000 });
@@ -391,7 +402,7 @@ try {
   const speechWindow = await electron.firstWindow();
   speechWindow.setDefaultTimeout(10_000);
   speechWindow.on("pageerror", (error) => errors.push(error.message));
-  await visible(speechWindow.getByRole("heading", { name: "开始面试" }));
+  await visible(button(speechWindow, "开始面试"));
   const readSettings = () => speechWindow.evaluate(() => window.auralDesktop.getSettings());
   const migrated = await readSettings();
   assert.equal(migrated.text.model, defaultModel);

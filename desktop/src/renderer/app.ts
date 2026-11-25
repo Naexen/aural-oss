@@ -89,7 +89,7 @@ function startWorkspace() {
   function home() {
     return `<main class="home"><section class="start-card">
       <div class="hero-icon">${icon("mic", 42)}</div>
-      <h1>开始面试</h1>
+      <button class="button primary start-button" type="button" data-action="start">${icon("mic")}开始面试</button>
       <label class="mic-switch">
         <span>${icon("mic")}电脑麦克风</span>
         <input type="checkbox" role="switch" id="start-mic" ${startWithMic ? "checked" : ""} aria-label="开始时开启电脑麦克风">
@@ -103,7 +103,6 @@ function startWorkspace() {
           ${brief ? `<div class="brief"><strong>候选人简报</strong><p>${h(brief.summary)}</p><ul>${brief.verify.map((item) => `<li>${h(item)}</li>`).join("")}</ul></div>` : ""}
         </div>
       </details>
-      <button class="button primary start-button" type="button" data-action="start">${icon("mic")}开始面试</button>
       <div class="ready"><span class="dot ${settings?.text.hasKey ? "green" : ""}"></span>${settings?.text.hasKey ? "默认文本模型已配置" : "可直接开始 · 模型选配"}</div>
       <p class="notice ${issue ? "error" : ""}" data-notice role="status">${h(notice)}</p>
     </section></main>`;
