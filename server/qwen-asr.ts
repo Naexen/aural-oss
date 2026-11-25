@@ -53,33 +53,47 @@ interface QwenEvent {
   error?: { code?: string; message?: string };
 }
 
-export function parseQwenAsrResponse(state: QwenAsrState, event: QwenEvent): AsrResponse | null {
+export type QwenAsrEvent =
+  | { kind: "started"; id: string }
+  | { kind: "transcript"; id: string; text: string; finalized: boolean }
+  | { kind: "finished" }
+  | { kind: "error"; message: string };
+
+export function normalizeQwenAsrEvent(event: QwenEvent, language?: string): QwenAsrEvent | null {
   if (event.type === "error" || event.type === "conversation.item.input_audio_transcription.failed") {
-    return {
-      messageType: 15,
-      errorCode: -1,
-      errorMessage: event.error?.message || event.error?.code || "Qwen ASR failed",
-    };
+    return { kind: "error", message: event.error?.message || event.error?.code || "Qwen ASR failed" };
   }
+  if (event.type === "session.finished") return { kind: "finished" };
   if (event.type === "input_audio_buffer.speech_started") {
-    if (event.item_id && !state.items.has(event.item_id)) {
-      state.items.set(event.item_id, { text: "", definite: false });
-    }
-    return null;
+    return event.item_id ? { kind: "started", id: event.item_id } : null;
   }
   const completed = event.type === "conversation.item.input_audio_transcription.completed";
   const partial = event.type === "conversation.item.input_audio_transcription.text";
   if (!completed && !partial) return null;
   if (!event.item_id) throw new Error("Qwen ASR transcript is missing item_id");
 
-  const previous = state.items.get(event.item_id);
-  // A late draft must never replace an authoritative final or reopen a committed turn.
-  if (previous?.definite && partial) return null;
-  state.items.set(event.item_id, {
+  return {
+    kind: "transcript",
+    id: event.item_id,
     // text is a stable prefix and stash is its draft suffix, not a delta to append repeatedly.
-    text: filterQwenTranscript(completed ? event.transcript || "" : (event.text || "") + (event.stash || ""), state.language),
-    definite: completed,
-  });
+    text: filterQwenTranscript(completed ? event.transcript || "" : (event.text || "") + (event.stash || ""), language),
+    finalized: completed,
+  };
+}
+
+export function parseQwenAsrResponse(state: QwenAsrState, event: QwenEvent): AsrResponse | null {
+  const result = normalizeQwenAsrEvent(event, state.language);
+  if (!result || result.kind === "finished") return null;
+  if (result.kind === "error") return { messageType: 15, errorCode: -1, errorMessage: result.message };
+  if (result.kind === "started") {
+    if (!state.items.has(result.id)) state.items.set(result.id, { text: "", definite: false });
+    return null;
+  }
+
+  const previous = state.items.get(result.id);
+  // A late draft must never replace an authoritative final or reopen a committed turn.
+  if (previous?.definite && !result.finalized) return null;
+  state.items.set(result.id, { text: result.text, definite: result.finalized });
   const utterances = [...state.items.values()].map((item) => ({ ...item }));
   return {
     messageType: 9,

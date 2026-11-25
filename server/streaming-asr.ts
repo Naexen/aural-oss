@@ -6,11 +6,11 @@ import {
 } from "./volcengine-asr";
 import {
   QWEN_ASR_URL, buildQwenSessionUpdate, buildQwenAudioAppend, buildQwenSessionFinish,
-  createQwenAsrState, parseQwenAsrResponse,
+  createQwenAsrState, normalizeQwenAsrEvent, parseQwenAsrResponse, type QwenAsrEvent,
 } from "./qwen-asr";
 import {
   QWEN_AUDIO_ASR_URL, buildQwenAudioTask, buildQwenAudioTaskFinish,
-  createQwenAudioAsrState, parseQwenAudioAsrResponse,
+  createQwenAudioAsrState, normalizeQwenAudioAsrEvent, parseQwenAudioAsrResponse,
 } from "./qwen-audio-asr";
 
 export type AsrProvider = "seed" | "qwen" | "qwen-audio";
@@ -32,6 +32,9 @@ interface StreamingAsrOptions {
   requestId: string;
   config: BigModelAsrConfig;
   noiseThreshold?: number;
+  url?: string;
+  model?: string;
+  maxPayload?: number;
 }
 
 type SocketFactory = (url: string, options: WebSocket.ClientOptions) => WebSocket;
@@ -50,11 +53,13 @@ export class StreamingAsrConnection {
     this.qwenState = createQwenAsrState(options.config.language);
     this.qwenAudioState = createQwenAudioAsrState(options.config.language);
     if (!options.apiKey.trim()) throw new Error(`Missing ${options.provider !== "seed" ? "QWEN_ASR_API_KEY" : "DOUBAO_API_KEY"}`);
-    this.socket = socketFactory(options.provider === "qwen" ? QWEN_ASR_URL : options.provider === "qwen-audio" ? QWEN_AUDIO_ASR_URL : BIGMODEL_ASR_URL, {
+    const defaultUrl = options.provider === "qwen" ? QWEN_ASR_URL : options.provider === "qwen-audio" ? QWEN_AUDIO_ASR_URL : BIGMODEL_ASR_URL;
+    this.socket = socketFactory(options.url ?? defaultUrl, {
       headers: options.provider !== "seed"
         ? { Authorization: `Bearer ${options.apiKey}`, "OpenAI-Beta": "realtime=v1" }
         : buildBigModelHeaders(options.appId || "", options.accessToken || "", options.requestId, options.resourceId, options.apiKey),
       handshakeTimeout: 10_000,
+      ...(options.maxPayload !== undefined ? { maxPayload: options.maxPayload } : {}),
     });
     this.on = this.socket.on.bind(this.socket);
     this.removeAllListeners = this.socket.removeAllListeners.bind(this.socket);
@@ -90,7 +95,7 @@ export class StreamingAsrConnection {
           if (this.options.provider === "qwen") {
             socket.send(JSON.stringify(buildQwenSessionUpdate(this.options.config.language, this.options.config.endWindowSize, this.options.noiseThreshold)));
           } else if (this.options.provider === "qwen-audio") {
-            socket.send(JSON.stringify(buildQwenAudioTask(this.options.requestId, this.options.config.language, this.options.config.endWindowSize, this.options.config.corpus, this.options.noiseThreshold)));
+            socket.send(JSON.stringify(buildQwenAudioTask(this.options.requestId, this.options.config.language, this.options.config.endWindowSize, this.options.config.corpus, this.options.noiseThreshold, this.options.model)));
           } else {
             socket.send(buildBigModelFullRequest(this.options.config, this.options.requestId));
             finish();
@@ -139,6 +144,17 @@ export class StreamingAsrConnection {
         : parseAsrResponse(data);
     if (response?.errorMessage) response.errorMessage = response.errorMessage.replaceAll(this.options.apiKey, "[redacted]");
     return response;
+  }
+
+  parseTranscriptEvent(data: Buffer): QwenAsrEvent | null {
+    const { provider, requestId, config, apiKey } = this.options;
+    if (provider === "seed") return null;
+    const event = JSON.parse(data.toString());
+    const result = provider === "qwen"
+      ? normalizeQwenAsrEvent(event, config.language)
+      : normalizeQwenAudioAsrEvent(event, requestId, config.language);
+    if (result?.kind === "error") return { ...result, message: result.message.replaceAll(apiKey, "[redacted]") };
+    return result;
   }
 
   close(): void {

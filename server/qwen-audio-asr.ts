@@ -1,11 +1,12 @@
 /** Qwen Audio 3.0's task-based streaming protocol. Drafts replace a sentence by ID. */
 import type { AsrResponse, AsrUtterance } from "./volcengine-asr";
+import type { QwenAsrEvent } from "./qwen-asr";
 import { filterQwenTranscript, resolveQwenAsrLanguage } from "./qwen-asr-controls";
 
 export const QWEN_AUDIO_ASR_MODEL = "qwen-audio-3.0-asr-flash-streaming";
 export const QWEN_AUDIO_ASR_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
 
-export function buildQwenAudioTask(taskId: string, language?: string, silenceMs = 800, corpus?: Record<string, unknown>, noiseThreshold = 0.1) {
+export function buildQwenAudioTask(taskId: string, language?: string, silenceMs = 800, corpus?: Record<string, unknown>, noiseThreshold = 0.1, model = QWEN_AUDIO_ASR_MODEL) {
   const hint = resolveQwenAsrLanguage(language);
   // Reuse Seed's topic/question/recent-dialog hints in Qwen's documented context format.
   // Keep a bounded vocabulary/context hint, without inventing names or forcing hotwords.
@@ -22,7 +23,7 @@ export function buildQwenAudioTask(taskId: string, language?: string, silenceMs 
   return {
     header: { action: "run-task", task_id: taskId, streaming: "duplex" },
     payload: {
-      task_group: "audio", task: "asr", function: "recognition", model: QWEN_AUDIO_ASR_MODEL,
+      task_group: "audio", task: "asr", function: "recognition", model,
       parameters: {
         format: "pcm", sample_rate: 16000, semantic_punctuation_enabled: false, heartbeat: true,
         max_sentence_silence: Math.max(200, Math.min(6000, silenceMs)),
@@ -48,18 +49,27 @@ interface QwenAudioEvent {
   } } };
 }
 
-export function parseQwenAudioAsrResponse(state: QwenAudioAsrState, event: QwenAudioEvent, taskId: string): AsrResponse | null {
+export function normalizeQwenAudioAsrEvent(event: QwenAudioEvent, taskId: string, language?: string): QwenAsrEvent | null {
   if (event.header?.task_id !== taskId) return null;
   if (event.header.event === "task-failed") {
-    return { messageType: 15, errorCode: -1, errorMessage: event.header.error_message || event.header.error_code || "Qwen Audio ASR failed" };
+    return { kind: "error", message: event.header.error_message || event.header.error_code || "Qwen Audio ASR failed" };
   }
+  if (event.header.event === "task-finished") return { kind: "finished" };
   if (event.header.event !== "result-generated") return null;
   const sentence = event.payload?.output?.sentence;
   if (!sentence || sentence.heartbeat) return null;
   const id = sentence.sentence_id ?? sentence.begin_time;
   if (id == null || !Number.isFinite(id)) throw new Error("Qwen Audio ASR sentence is missing identity");
-  if (state.sentences.get(id)?.definite && !sentence.sentence_end) return null;
-  state.sentences.set(id, { text: filterQwenTranscript(sentence.text || "", state.language), definite: !!sentence.sentence_end });
+  return { kind: "transcript", id: String(id), text: filterQwenTranscript(sentence.text || "", language), finalized: !!sentence.sentence_end };
+}
+
+export function parseQwenAudioAsrResponse(state: QwenAudioAsrState, event: QwenAudioEvent, taskId: string): AsrResponse | null {
+  const result = normalizeQwenAudioAsrEvent(event, taskId, state.language);
+  if (!result || result.kind === "finished" || result.kind === "started") return null;
+  if (result.kind === "error") return { messageType: 15, errorCode: -1, errorMessage: result.message };
+  const id = Number(result.id);
+  if (state.sentences.get(id)?.definite && !result.finalized) return null;
+  state.sentences.set(id, { text: result.text, definite: result.finalized });
   const utterances = [...state.sentences].sort(([a], [b]) => a - b).map(([, sentence]) => ({ ...sentence }));
   return { messageType: 9, text: utterances.map((sentence) => sentence.text.trim()).filter(Boolean).join(" "), utterances };
 }
